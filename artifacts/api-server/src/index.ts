@@ -1,5 +1,7 @@
+import { createServer } from "node:http";
 import app from "./app";
 import { logger } from "./lib/logger";
+import { setupSignaling } from "./signaling";
 
 const rawPort = process.env["PORT"];
 
@@ -15,7 +17,10 @@ if (Number.isNaN(port) || port <= 0) {
   throw new Error(`Invalid PORT value: "${rawPort}"`);
 }
 
-app.listen(port, (err) => {
+const httpServer = createServer(app);
+setupSignaling(httpServer);
+
+httpServer.listen(port, (err?: Error) => {
   if (err) {
     logger.error({ err }, "Error listening on port");
     process.exit(1);
