@@ -52,10 +52,20 @@ export function CallRoom() {
       addLog("success", "Remote stream received — attaching to video element");
       const el = remoteVideoRef.current;
       if (el) {
-        el.srcObject = stream;
-        el.play().catch(err =>
-          addLog("warn", `Remote video play() blocked: ${err.message}`)
-        );
+        // Only reassign srcObject when the stream is genuinely new.
+        // Re-assigning the same object (or assigning while a play() is pending)
+        // causes "play() interrupted by a new load request" warnings.
+        if (el.srcObject !== stream) {
+          el.srcObject = stream;
+        }
+        // play() is safe to call once; the browser is idempotent if already playing.
+        el.play().catch(err => {
+          // AbortError just means a second play() raced — safe to ignore here
+          // because the first call already won.
+          if ((err as DOMException).name !== "AbortError") {
+            addLog("warn", `Remote video play() blocked: ${err.message}`);
+          }
+        });
       }
       setStatus("connected");
       setStatusMessage("Connected");

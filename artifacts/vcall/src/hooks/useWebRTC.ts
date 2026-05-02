@@ -53,6 +53,11 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
   const callbacksRef       = useRef(callbacks);
   callbacksRef.current     = callbacks;
 
+  // Track the stream ID we last forwarded to onRemoteStream.
+  // Both the audio and video ontrack events carry the same MediaStream object —
+  // we only need to notify the caller once per unique stream.
+  const notifiedStreamIdRef = useRef<string | null>(null);
+
   // ICE servers — starts with STUN-only; updated by CallRoom once /api/ice-servers responds
   const iceServersRef = useRef<RTCIceServer[]>(ICE_SERVERS);
 
@@ -99,8 +104,10 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     if (pcRef.current) {
       pcRef.current.close();
     }
-    remoteDescSet.current   = false;
-    iceCandidateBuf.current = [];
+    remoteDescSet.current     = false;
+    iceCandidateBuf.current   = [];
+    // Reset so the first ontrack on the new PC is always forwarded
+    notifiedStreamIdRef.current = null;
 
     log("info", `RTCPeerConnection created — ${iceServersRef.current.length} ICE server(s)`);
     const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
@@ -172,9 +179,20 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     };
 
     pc.ontrack = (ev) => {
-      log("success", `ontrack fired — kind:${ev.track.kind}, streams:${ev.streams.length}`);
+      log("info", `ontrack — kind:${ev.track.kind}, streams:${ev.streams.length}`);
       const stream = ev.streams[0] ?? new MediaStream([ev.track]);
-      log("success", `Remote video srcObject set`);
+
+      // Audio and video tracks each fire a separate ontrack event but both
+      // arrive on the same MediaStream.  Only forward the stream to the caller
+      // the first time we see it — re-notifying on every track causes repeated
+      // srcObject assignment + play() calls which trigger the
+      // "play() interrupted by a new load request" warning.
+      if (stream.id === notifiedStreamIdRef.current) {
+        log("info", `ontrack(${ev.track.kind}) — same stream already attached, skipping srcObject update`);
+        return;
+      }
+      notifiedStreamIdRef.current = stream.id;
+      log("success", `Remote stream (${stream.id.slice(0, 8)}) — forwarding to caller`);
       setDebugInfo(d => ({ ...d, remoteStream: true }));
       callbacksRef.current.onRemoteStream(stream);
     };
