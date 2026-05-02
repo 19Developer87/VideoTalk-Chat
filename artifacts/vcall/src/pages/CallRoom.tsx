@@ -8,7 +8,9 @@ import {
   PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users, Terminal,
 } from "lucide-react";
 
-type ConnectionStatus = "connecting" | "waiting" | "connected" | "disconnected" | "error" | "full";
+// "reconnecting" keeps the call screen open with a banner overlay.
+// "disconnected" shows the full overlay (permanent / explicit peer-left).
+type ConnectionStatus = "connecting" | "waiting" | "connected" | "reconnecting" | "disconnected" | "error" | "full";
 
 function ts(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false });
@@ -29,7 +31,12 @@ export function CallRoom() {
 
   const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const remotePeerRef  = useRef<string | null>(null);  // socketId of the other peer
+  const remotePeerRef  = useRef<string | null>(null);
+
+  // Track who is the current offerer so ICE restart is initiated correctly.
+  // true  = this peer called makeOffer() / is responsible for ICE restart offers.
+  // false = this peer receives offers and answers.
+  const isInitiatorRef = useRef(false);
 
   const inviteLink = `${window.location.origin}/?room=${roomId}`;
 
@@ -55,15 +62,49 @@ export function CallRoom() {
     },
 
     onConnectionStateChange: (state) => {
-      if (state === "disconnected" || state === "failed" || state === "closed") {
+      if (state === "disconnected") {
+        // ── Temporary ICE drop — keep call screen open, show reconnecting banner ──
+        // Do NOT clear the remote video. The ICE grace timer in useWebRTC will
+        // either recover (fires "connected") or escalate (fires onIceNeedsRestart).
+        setStatus("reconnecting");
+        setStatusMessage("Connection interrupted — reconnecting…");
+        addLog("warn", "Connection interrupted — waiting for ICE recovery");
+      } else if (state === "connected") {
+        const wasReconnecting = (s: ConnectionStatus) => s === "reconnecting";
+        setStatus(prev => {
+          if (wasReconnecting(prev)) {
+            addLog("success", "Connection recovered!");
+          }
+          return "connected";
+        });
+        setStatusMessage("Connected");
+      } else if (state === "failed" || state === "closed") {
+        // ── Terminal failure — show full "Peer disconnected" overlay ──────────
+        addLog("error", `WebRTC connection ${state} — showing disconnect screen`);
         setStatus("disconnected");
         setStatusMessage("Peer disconnected");
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
-      } else if (state === "connecting") {
-        setStatusMessage("Establishing P2P connection…");
-      } else if (state === "connected") {
-        setStatus("connected");
-        setStatusMessage("Connected");
+      }
+    },
+
+    // ── ICE restart ─────────────────────────────────────────────────────────
+    // Fired by useWebRTC when ICE cannot recover on its own (grace timer expired
+    // or iceConnectionState === "failed").
+    // Only the current offerer sends the restart offer to avoid glare.
+    onIceNeedsRestart: async () => {
+      if (!isInitiatorRef.current || !remotePeerRef.current) {
+        addLog("info", "ICE restart needed — waiting for offerer peer to initiate");
+        return;
+      }
+      addLog("warn", "ICE restart initiated — sending restart offer");
+      try {
+        const offer = await webrtc.makeIceRestartOffer();
+        if (offer) {
+          signaling.sendOffer(remotePeerRef.current, offer, true /* isRestart */);
+          addLog("success", "ICE restart offer sent");
+        }
+      } catch (err) {
+        addLog("error", `ICE restart offer failed: ${(err as Error).message}`);
       }
     },
 
@@ -79,14 +120,28 @@ export function CallRoom() {
   const signaling = useSignaling({
     onLog: addLog,
 
-    // Both users receive this after join-room
+    onSignalingDropped: () => {
+      addLog("warn", "Signaling server connection dropped — reconnecting…");
+      // Only update status if we were in a stable call; don't override error states
+      setStatus(prev => (prev === "connected" ? "reconnecting" : prev));
+      setStatusMessage(prev => (prev === "Connected" ? "Signaling interrupted — reconnecting…" : prev));
+    },
+
+    onSignalingRestored: () => {
+      addLog("success", "Signaling server reconnected — room rejoined");
+      // Status will be updated when joined-room fires again
+    },
+
+    // Both users receive this after join-room (including after reconnect)
     onJoinedRoom: ({ peers, isInitiator }) => {
       if (isInitiator) {
-        // HOST — wait; will send offer when peer-joined fires
+        // HOST — will send offer when peer-joined fires
+        isInitiatorRef.current = false; // will be set true in onPeerJoined
         setStatus("waiting");
         setStatusMessage("Waiting for someone to join…");
       } else {
-        // JOINER — host is already in peers list; wait for host to send offer
+        // JOINER — host is already in room; wait for host to send offer
+        isInitiatorRef.current = false;
         if (peers.length > 0) {
           remotePeerRef.current = peers[0].socketId;
           setPeerName(peers[0].displayName);
@@ -96,10 +151,11 @@ export function CallRoom() {
       }
     },
 
-    // HOST receives this when joiner arrives → host makes offer
+    // Whoever receives peer-joined becomes the offerer for this session
     onPeerJoined: async ({ socketId, displayName: name }) => {
       remotePeerRef.current = socketId;
       setPeerName(name);
+      isInitiatorRef.current = true; // this peer is now responsible for offers
       setStatus("connecting");
       setStatusMessage(`${name} joined — starting call…`);
       try {
@@ -113,26 +169,31 @@ export function CallRoom() {
       }
     },
 
-    // JOINER receives offer from host → make answer
-    onOffer: async ({ from, offer }) => {
+    // Receive an offer — either initial (makeAnswer) or ICE restart (handleIceRestartOffer)
+    onOffer: async ({ from, offer, isRestart }) => {
       remotePeerRef.current = from;
-      addLog("info", `Offer received from ${from} — creating answer…`);
-      setStatusMessage("Connecting…");
+      isInitiatorRef.current = false; // we're the responder
+      addLog("info", `Offer received from ${from}${isRestart ? " [ICE restart]" : ""}`);
       try {
-        const answer = await webrtc.makeAnswer(offer);
+        const answer = isRestart
+          ? await webrtc.handleIceRestartOffer(offer)
+          : await webrtc.makeAnswer(offer);
         signaling.sendAnswer(from, answer);
-        setStatusMessage("Almost there…");
+        if (!isRestart) setStatusMessage("Almost there…");
+        addLog("success", isRestart ? "ICE restart answer sent" : "Answer sent");
       } catch (err) {
-        addLog("error", `makeAnswer failed: ${(err as Error).message}`);
-        setStatus("error");
-        setStatusMessage("Failed to connect — please reload and try again.");
+        addLog("error", `${isRestart ? "ICE restart" : "makeAnswer"} failed: ${(err as Error).message}`);
+        if (!isRestart) {
+          setStatus("error");
+          setStatusMessage("Failed to connect — please reload and try again.");
+        }
       }
     },
 
-    // HOST receives answer from joiner
+    // HOST receives answer from joiner (works for both initial and ICE restart)
     onAnswer: async ({ answer }) => {
       addLog("info", "Answer received — finalising connection…");
-      setStatusMessage("Finalising connection…");
+      if (status !== "reconnecting") setStatusMessage("Finalising connection…");
       try {
         await webrtc.receiveAnswer(answer);
       } catch (err) {
@@ -145,11 +206,14 @@ export function CallRoom() {
       await webrtc.addIceCandidate(candidate);
     },
 
+    // Only emitted by server after grace timer expires or explicit leave-room
     onPeerLeft: () => {
+      addLog("warn", "Peer left the call (server confirmed)");
       setStatus("disconnected");
       setStatusMessage("Peer left the call");
       setPeerName("");
       remotePeerRef.current = null;
+      isInitiatorRef.current = false;
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     },
 
@@ -172,7 +236,7 @@ export function CallRoom() {
         signaling.joinRoom(roomId!, displayName);
       } catch (err: unknown) {
         const e = err as { name?: string; message?: string };
-        const isPerms = e.name === "NotAllowedError" || e.name === "PermissionDeniedError";
+        const isPerms    = e.name === "NotAllowedError" || e.name === "PermissionDeniedError";
         const isNotFound = e.name === "NotFoundError";
         setStatus("error");
         setStatusMessage(
@@ -220,12 +284,17 @@ export function CallRoom() {
   }, [webrtc]);
 
   const statusColor: Record<ConnectionStatus, string> = {
-    connecting: "text-yellow-400", waiting: "text-blue-400", connected: "text-emerald-400",
-    disconnected: "text-orange-400", error: "text-red-400", full: "text-red-400",
+    connecting:   "text-yellow-400",
+    waiting:      "text-blue-400",
+    connected:    "text-emerald-400",
+    reconnecting: "text-orange-400",
+    disconnected: "text-red-400",
+    error:        "text-red-400",
+    full:         "text-red-400",
   };
 
   const StatusIcon = () => {
-    if (status === "connecting") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
+    if (status === "connecting" || status === "reconnecting") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
     if (status === "connected")  return <Wifi    className="w-3.5 h-3.5" />;
     if (status === "waiting")    return <Users   className="w-3.5 h-3.5" />;
     return <WifiOff className="w-3.5 h-3.5" />;
@@ -233,11 +302,14 @@ export function CallRoom() {
 
   const { debugInfo } = webrtc;
 
+  // Full overlay shown when NOT in a call and NOT reconnecting
+  const showFullOverlay = status !== "connected" && status !== "reconnecting";
+
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-screen h-screen bg-zinc-950 overflow-hidden">
 
-      {/* Remote video — full screen */}
+      {/* Remote video — always mounted; srcObject cleared on permanent disconnect */}
       <video
         ref={remoteVideoRef}
         autoPlay
@@ -245,13 +317,13 @@ export function CallRoom() {
         className="absolute inset-0 w-full h-full object-cover"
       />
 
-      {/* Waiting / Error overlay */}
-      {status !== "connected" && (
+      {/* ── Full overlay (waiting / error / permanent disconnect) ───────────── */}
+      {showFullOverlay && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 z-10 px-6">
           <div className="text-center w-full max-w-sm">
 
             {/* Icon */}
-            {(status === "error" || status === "full") ? (
+            {(status === "error" || status === "full" || status === "disconnected") ? (
               <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-5">
                 <WifiOff className="w-8 h-8 text-red-400" />
               </div>
@@ -267,9 +339,9 @@ export function CallRoom() {
 
             {/* Heading */}
             <h2 className="text-white text-xl font-semibold mb-1">
-              {status === "waiting"  ? "Waiting for someone to join" :
-               status === "error"    ? "Something went wrong" :
-               status === "full"     ? "Room is full" :
+              {status === "waiting"      ? "Waiting for someone to join" :
+               status === "error"        ? "Something went wrong" :
+               status === "full"         ? "Room is full" :
                status === "disconnected" ? "Call ended" :
                "Connecting…"}
             </h2>
@@ -301,7 +373,7 @@ export function CallRoom() {
             {/* Error — actionable help */}
             {status === "error" && (
               <div className="space-y-3">
-                {statusMessage.includes("permission") || statusMessage.includes("denied") ? (
+                {(statusMessage.includes("permission") || statusMessage.includes("denied")) ? (
                   <div className="bg-zinc-800/80 border border-zinc-700 rounded-xl p-4 text-left space-y-2">
                     <p className="text-zinc-300 text-sm font-medium">How to fix this:</p>
                     <ol className="text-zinc-400 text-sm space-y-1 list-decimal list-inside">
@@ -324,7 +396,7 @@ export function CallRoom() {
               </div>
             )}
 
-            {/* Full / disconnected */}
+            {/* Full / disconnected — back button */}
             {(status === "full" || status === "disconnected") && (
               <button
                 onClick={() => navigate("/")}
@@ -338,12 +410,21 @@ export function CallRoom() {
         </div>
       )}
 
+      {/* ── Reconnecting banner (shown ON TOP of the live call video) ──────────
+          Keeps the call screen intact so the user isn't sent back to home.
+          Disappears as soon as connection recovers.                           */}
+      {status === "reconnecting" && (
+        <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-center py-2 px-4 bg-orange-500/90 backdrop-blur-sm">
+          <Loader2 className="w-4 h-4 text-white animate-spin mr-2 shrink-0" />
+          <span className="text-white text-sm font-medium">{statusMessage}</span>
+        </div>
+      )}
+
       {/* Debug log panel */}
       {showDebug && (
-        <div className="absolute top-4 left-4 z-50 w-full max-w-sm pointer-events-none">
+        <div className={`absolute left-4 z-50 w-full max-w-sm pointer-events-none ${status === "reconnecting" ? "top-12" : "top-4"}`}>
           <div className="pointer-events-auto">
             <DebugLog entries={logs} onClose={() => setShowDebug(false)} />
-            {/* Connection status panel */}
             <div className="mt-2 bg-black/80 backdrop-blur-sm border border-zinc-700 rounded-xl px-3 py-2 font-mono text-xs space-y-0.5">
               <div className="flex gap-3 flex-wrap">
                 <span className={debugInfo.localVideo  ? "text-emerald-400" : "text-red-400"}>
@@ -366,9 +447,9 @@ export function CallRoom() {
       )}
 
       {/* Peer name badge */}
-      {status === "connected" && peerName && (
+      {(status === "connected" || status === "reconnecting") && peerName && (
         <div className="absolute top-4 left-4 z-20 bg-black/40 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
-          <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+          <div className={`w-2 h-2 rounded-full ${status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-orange-400"}`} />
           <span className="text-white text-sm font-medium">{peerName}</span>
         </div>
       )}
@@ -389,8 +470,8 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Status badge */}
-      <div className={`absolute top-4 right-4 z-20 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]}`}>
+      {/* Status badge (top-right) */}
+      <div className={`absolute right-4 z-20 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]} ${status === "reconnecting" ? "top-12" : "top-4"}`}>
         <StatusIcon />
         <span>{statusMessage}</span>
       </div>

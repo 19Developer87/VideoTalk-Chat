@@ -1,0 +1,117 @@
+Problem update:
+
+The call connects successfully, but after about 1 minute the joined user/non-host disconnects.
+
+From the logs:
+- ICE connection state → disconnected
+- WebRTC connection state → disconnected
+- About 10 seconds later:
+- WebRTC connection state → failed
+- UI then shows “Peer disconnected”
+
+This is happening even though the user did not press hang up.
+
+Please debug and fix this as a WebRTC stability/reconnect issue.
+
+Likely causes:
+1. No TURN server is configured, so some mobile/network combinations fail after ICE drops.
+2. ICE restart is not implemented.
+3. The app treats temporary ICE disconnection as final peer disconnect.
+4. The non-host is not allowed to renegotiate/reconnect correctly.
+5. The peer connection is being closed too early.
+6. Replit/server sleep or websocket interruption may be breaking signaling.
+7. Mobile browser backgrounding/screen lock/network switching may interrupt media.
+
+Required fixes:
+
+1. Add ICE restart support
+When iceConnectionState becomes "disconnected" or "failed":
+- Do not immediately show “Peer disconnected”
+- Show “Connection interrupted… reconnecting”
+- Start a 5–10 second grace timer
+- If the connection recovers, cancel the timer and show “Reconnected”
+- If it becomes "failed", attempt ICE restart
+
+For the offerer/host:
+- call createOffer({ iceRestart: true })
+- setLocalDescription
+- send a reconnect-offer or normal offer with a reconnect flag
+
+For the receiver/non-host:
+- accept the new offer
+- setRemoteDescription
+- createAnswer
+- setLocalDescription
+- send answer back
+
+2. Add a polite/impolite negotiation pattern
+Avoid both peers creating offers at the same time.
+
+Use a stable pattern:
+- Host is the offerer/impolite peer
+- Joiner is polite peer
+- Only host initiates normal offers and ICE restarts unless host is gone
+- Joiner responds with answer
+
+3. Do not close the peer connection too early
+Only close peer connection when:
+- user presses hang up
+- socket receives explicit peer-left
+- reconnect attempts fail after a reasonable timeout
+
+Do not close on:
+- iceConnectionState = disconnected
+- connectionState = disconnected
+
+4. Add TURN server support
+STUN alone may not be enough for Android/mobile networks.
+
+Add support for TURN configuration in the code, even if using a free/test TURN temporarily.
+
+Use:
+- STUN: stun:stun.l.google.com:19302
+- Add placeholders/config variables for TURN:
+  - TURN_URL
+  - TURN_USERNAME
+  - TURN_CREDENTIAL
+
+Explain clearly that production WebRTC needs a TURN server for reliable mobile calls.
+
+5. Add WebSocket reconnect handling
+If socket disconnects unexpectedly:
+- show “Signaling interrupted… reconnecting”
+- reconnect socket automatically
+- rejoin the same room using saved roomId and display name
+- do not reset the whole app
+- do not send peer-left unless the user pressed hang up
+
+Important:
+Only emit “peer-left” when the user intentionally presses hang up or leaves the room.
+Do not emit peer-left during refresh/reconnect/temporary network drops.
+
+6. Add debugging logs
+Add visible logs for:
+- socket disconnected reason
+- socket reconnect attempt
+- socket reconnected
+- room rejoined
+- ICE disconnected timer started
+- ICE recovered
+- ICE restart requested
+- ICE restart offer sent
+- ICE restart answer sent
+- peer connection failed
+- reconnect failed after timeout
+
+7. Fix UI behaviour
+When connection drops temporarily:
+- Do not send user back to home immediately
+- Keep the call screen open
+- Keep local preview visible
+- Show reconnecting status
+- Only show “Peer disconnected” if reconnect fully fails or explicit peer-left is received
+
+Expected result:
+The non-host should not be kicked out after 1 minute.
+Temporary ICE disconnects should trigger reconnect/ICE restart.
+If reconnection succeeds, the call continues without needing a new invite link.

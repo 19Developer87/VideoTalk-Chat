@@ -9,25 +9,40 @@ const QUALITY_CONSTRAINTS: Record<VideoQuality, MediaTrackConstraints> = {
   high:   { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
 };
 
+// ─── ICE server configuration ─────────────────────────────────────────────────
+// STUN-only works for most desktop/WiFi scenarios.
+// For reliable mobile (Android, cellular) calls you need a TURN server.
+// Replace the placeholder values below with real TURN credentials in production.
+// Free options: Metered (https://www.metered.ca), Twilio, Xirsys.
 const ICE_SERVERS: RTCIceServer[] = [
   { urls: "stun:stun.l.google.com:19302"  },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
+  // TURN placeholder — uncomment and fill in for production mobile reliability:
+  // {
+  //   urls:       "turn:TURN_URL:3478",
+  //   username:   "TURN_USERNAME",
+  //   credential: "TURN_CREDENTIAL",
+  // },
 ];
+
+// How long to wait after ICE "disconnected" before treating it as a failure
+const ICE_GRACE_MS = 8_000;
 
 export interface WebRTCCallbacks {
   onRemoteStream:          (stream: MediaStream) => void;
   onConnectionStateChange: (state: RTCPeerConnectionState) => void;
   onIceCandidateGathered:  (candidate: RTCIceCandidateInit) => void;
+  onIceNeedsRestart?:      () => void;   // fired when ICE cannot recover on its own
   onLog:                   LogFn;
 }
 
 export interface DebugInfo {
-  localVideo:    boolean;
-  localAudio:    boolean;
-  remoteStream:  boolean;
-  connState:     string;
-  iceConnState:  string;
+  localVideo:   boolean;
+  localAudio:   boolean;
+  remoteStream: boolean;
+  connState:    string;
+  iceConnState: string;
 }
 
 export function useWebRTC(callbacks: WebRTCCallbacks) {
@@ -37,6 +52,9 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
   const remoteDescSet      = useRef(false);
   const callbacksRef       = useRef(callbacks);
   callbacksRef.current     = callbacks;
+
+  // Grace timer: started on ICE "disconnected", cleared on recovery or failure
+  const iceGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   const [audioMuted, setAudioMuted] = useState(false);
   const [videoOff,   setVideoOff  ] = useState(false);
@@ -48,6 +66,13 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
 
   const log = useCallback((level: LogFn extends (...a: infer P) => void ? P[0] : never, msg: string) => {
     callbacksRef.current.onLog(level, msg);
+  }, []);
+
+  const clearIceGraceTimer = useCallback(() => {
+    if (iceGraceTimerRef.current !== null) {
+      clearTimeout(iceGraceTimerRef.current);
+      iceGraceTimerRef.current = null;
+    }
   }, []);
 
   // ─── Drain the ICE buffer once remote description is ready ──────────────────
@@ -65,8 +90,13 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
 
   // ─── Build a fresh RTCPeerConnection ────────────────────────────────────────
   const buildPC = useCallback((): RTCPeerConnection => {
-    pcRef.current?.close();
-    remoteDescSet.current  = false;
+    // Clear any pending grace timer from the previous connection
+    clearIceGraceTimer();
+
+    if (pcRef.current) {
+      pcRef.current.close();
+    }
+    remoteDescSet.current   = false;
     iceCandidateBuf.current = [];
 
     log("info", "RTCPeerConnection created (STUN: Google)");
@@ -86,8 +116,35 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
       log("info", `ICE gathering state → ${pc.iceGatheringState}`);
 
     pc.oniceconnectionstatechange = () => {
-      log("info", `ICE connection state → ${pc.iceConnectionState}`);
-      setDebugInfo(d => ({ ...d, iceConnState: pc.iceConnectionState }));
+      const iceState = pc.iceConnectionState;
+      log("info", `ICE connection state → ${iceState}`);
+      setDebugInfo(d => ({ ...d, iceConnState: iceState }));
+
+      if (iceState === "disconnected") {
+        // ── Temporary drop — start grace timer, notify UI as temporary ────────
+        log("warn", `ICE disconnected — starting ${ICE_GRACE_MS}ms grace timer before failing`);
+        callbacksRef.current.onConnectionStateChange("disconnected");
+        clearIceGraceTimer();
+        iceGraceTimerRef.current = setTimeout(() => {
+          iceGraceTimerRef.current = null;
+          if (pcRef.current === pc && pc.iceConnectionState === "disconnected") {
+            log("error", "ICE grace timer expired — requesting ICE restart");
+            callbacksRef.current.onIceNeedsRestart?.();
+          }
+        }, ICE_GRACE_MS);
+
+      } else if (iceState === "connected" || iceState === "completed") {
+        if (iceGraceTimerRef.current !== null) {
+          clearIceGraceTimer();
+          log("success", "ICE recovered — grace timer cancelled");
+          // Let onconnectionstatechange drive the "connected" callback
+        }
+
+      } else if (iceState === "failed") {
+        clearIceGraceTimer();
+        log("error", "ICE failed — requesting ICE restart");
+        callbacksRef.current.onIceNeedsRestart?.();
+      }
     };
 
     pc.onsignalingstatechange = () =>
@@ -98,7 +155,17 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
       const lvl = s === "connected" ? "success" : (s === "failed" || s === "closed") ? "error" : "info";
       log(lvl, `WebRTC connection state → ${s}`);
       setDebugInfo(d => ({ ...d, connState: s }));
-      callbacksRef.current.onConnectionStateChange(s);
+
+      if (s === "connected") {
+        // Clear grace timer if ICE recovered before the state machine caught up
+        clearIceGraceTimer();
+        callbacksRef.current.onConnectionStateChange("connected");
+      } else if (s === "failed" || s === "closed") {
+        clearIceGraceTimer();
+        callbacksRef.current.onConnectionStateChange(s);
+      }
+      // "disconnected" is intentionally NOT forwarded here —
+      // oniceconnectionstatechange handles it with the grace timer above.
     };
 
     pc.ontrack = (ev) => {
@@ -110,7 +177,7 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     };
 
     return pc;
-  }, [log]);
+  }, [log, clearIceGraceTimer]);
 
   // ─── Add local tracks to PC ─────────────────────────────────────────────────
   const addLocalTracks = useCallback((pc: RTCPeerConnection) => {
@@ -138,7 +205,7 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     return stream;
   }, [log]);
 
-  // ─── HOST: create offer ──────────────────────────────────────────────────────
+  // ─── HOST: create initial offer (builds fresh PC) ────────────────────────────
   const makeOffer = useCallback(async (): Promise<RTCSessionDescriptionInit> => {
     const pc = buildPC();
     addLocalTracks(pc);
@@ -149,7 +216,27 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     return pc.localDescription!;
   }, [buildPC, addLocalTracks, log]);
 
-  // ─── JOINER: receive offer, return answer ────────────────────────────────────
+  // ─── HOST: ICE restart offer (reuses existing PC) ────────────────────────────
+  // Only call this when the call is already established and ICE dropped.
+  const makeIceRestartOffer = useCallback(async (): Promise<RTCSessionDescriptionInit | null> => {
+    const pc = pcRef.current;
+    if (!pc || pc.signalingState === "closed") {
+      log("warn", "makeIceRestartOffer: no active PC — falling back to fresh offer");
+      return makeOffer();
+    }
+    try {
+      log("info", "ICE restart — creating offer with iceRestart:true");
+      const offer = await pc.createOffer({ iceRestart: true });
+      await pc.setLocalDescription(offer);
+      log("success", "ICE restart offer created — sending to peer");
+      return pc.localDescription!;
+    } catch (err) {
+      log("error", `ICE restart offer failed: ${(err as Error).message}`);
+      return null;
+    }
+  }, [makeOffer, log]);
+
+  // ─── JOINER: receive initial offer, return answer (builds fresh PC) ──────────
   const makeAnswer = useCallback(async (offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> => {
     const pc = buildPC();
     addLocalTracks(pc);
@@ -163,6 +250,29 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     log("success", `Answer created — type:${answer.type}`);
     return pc.localDescription!;
   }, [buildPC, addLocalTracks, drainIceBuf, log]);
+
+  // ─── JOINER: handle ICE restart offer (reuses existing PC) ───────────────────
+  // If no active PC exists, falls back to makeAnswer (full reconnect).
+  const handleIceRestartOffer = useCallback(async (offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> => {
+    const pc = pcRef.current;
+    if (!pc || pc.signalingState === "closed") {
+      log("warn", "handleIceRestartOffer: no active PC — falling back to makeAnswer");
+      return makeAnswer(offer);
+    }
+    try {
+      log("info", "ICE restart — setting new remote description (offer)");
+      await pc.setRemoteDescription(new RTCSessionDescription(offer));
+      remoteDescSet.current = true;
+      log("info", "ICE restart — creating answer");
+      const answer = await pc.createAnswer();
+      await pc.setLocalDescription(answer);
+      log("success", "ICE restart answer created");
+      return pc.localDescription!;
+    } catch (err) {
+      log("error", `ICE restart answer failed: ${(err as Error).message} — falling back to makeAnswer`);
+      return makeAnswer(offer);
+    }
+  }, [makeAnswer, log]);
 
   // ─── HOST: receive answer ────────────────────────────────────────────────────
   const receiveAnswer = useCallback(async (answer: RTCSessionDescriptionInit) => {
@@ -216,14 +326,15 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
 
   const hangUp = useCallback(() => {
     log("warn", "Hang up — closing PC and stopping tracks");
+    clearIceGraceTimer();
     pcRef.current?.close();
     pcRef.current = null;
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
-    remoteDescSet.current = false;
+    remoteDescSet.current   = false;
     iceCandidateBuf.current = [];
     setDebugInfo({ localVideo: false, localAudio: false, remoteStream: false, connState: "closed", iceConnState: "—" });
-  }, [log]);
+  }, [log, clearIceGraceTimer]);
 
   const enablePiP = useCallback(async (el: HTMLVideoElement) => {
     try {
@@ -238,7 +349,9 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     localStreamRef,
     getLocalStream,
     makeOffer,
+    makeIceRestartOffer,
     makeAnswer,
+    handleIceRestartOffer,
     receiveAnswer,
     addIceCandidate,
     toggleAudio,

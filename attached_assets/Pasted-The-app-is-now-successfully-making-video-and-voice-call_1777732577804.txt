@@ -1,0 +1,72 @@
+The app is now successfully making video and voice calls both ways.
+
+Do not rebuild from scratch. Keep the working WebRTC signaling flow intact.
+
+New fixes/features needed:
+
+1. False peer disconnect / auto reconnect
+Sometimes the app shows “peer disconnected” even when neither user intentionally disconnected.
+
+Please fix this by:
+- Only showing “peer disconnected” when the socket actually disconnects, the peer explicitly leaves, or the WebRTC connection fails permanently.
+- Do not treat temporary ICE state changes like “disconnected” as a final hang-up.
+- Add auto reconnect logic when connectionState or iceConnectionState becomes:
+  - disconnected
+  - failed
+- Attempt to reconnect without forcing users to re-enter the room.
+- Rejoin the same room automatically using the existing room ID and display name.
+- Restart/recreate the RTCPeerConnection if needed.
+- Re-exchange offer/answer and ICE candidates after reconnect.
+- Show friendly statuses:
+  - “Connection interrupted… reconnecting”
+  - “Reconnected”
+  - “Peer disconnected”
+  - “Call ended”
+- Add a short debounce/grace period before showing peer disconnected, for example 5–10 seconds.
+
+Important:
+Do not show “peer disconnected” immediately just because ICE temporarily changes to disconnected.
+
+2. Horizontal picture-in-picture / video orientation toggle
+Add an option to toggle the video display orientation.
+
+Purpose:
+If one user rotates their phone/camera, the other user should be able to display the video horizontally/landscape.
+
+Please add:
+- A button or setting called “Rotate Video” or “Landscape View”
+- It should rotate or change the remote video display between:
+  - normal portrait display
+  - horizontal/landscape display
+- This should affect the displayed video only, not the WebRTC stream itself.
+- Make sure it works on Android and Windows/browser views.
+- If real browser Picture-in-Picture cannot be rotated directly, then rotate the in-app video container before entering PiP or provide an in-app floating mini video window that supports landscape view.
+- Do not break normal video display.
+
+3. Scrollable bottom controls
+Some bottom call buttons are off-screen and cannot be accessed on smaller Android screens.
+
+Please fix the call controls by:
+- Making the bottom control bar horizontally scrollable.
+- Keep controls at the bottom of the screen.
+- Use large touch-friendly buttons.
+- Prevent the controls from covering too much of the video.
+- Add padding so the first and last buttons can be reached.
+- Use CSS similar to:
+  overflow-x: auto;
+  white-space: nowrap;
+  -webkit-overflow-scrolling: touch;
+- Do not wrap buttons off-screen vertically unless it still remains usable.
+- The user should be able to swipe left/right through all controls.
+
+Important rules:
+- Keep existing working video/audio call logic.
+- Make minimal safe changes.
+- Add logs for reconnect attempts and reconnect success/failure.
+- Test after changes:
+  - Android to Android
+  - Windows to Android
+  - invite link auto-join
+  - remote video still appears
+  - audio still works
+  - buttons are reachable on small screens
