@@ -237,16 +237,25 @@ export function CallRoom() {
             iceServers: RTCIceServer[];
             turnEnabled: boolean;
           };
+          // Count TURN entries so the log is unambiguous regardless of what the
+          // backend reports in turnEnabled
+          const turnCount = iceServers.filter(s =>
+            (Array.isArray(s.urls) ? s.urls : [s.urls])
+              .some(u => u.startsWith("turn:") || u.startsWith("turns:"))
+          ).length;
+          addLog("info", `ICE endpoint replied — total:${iceServers.length} TURN:${turnCount} turnEnabled:${turnEnabled}`);
           webrtc.updateIceServers(iceServers);
           addLog(
-            turnEnabled ? "success" : "info",
+            turnEnabled ? "success" : "warn",
             turnEnabled
-              ? `TURN enabled — ${iceServers.length} ICE server(s) loaded`
-              : "TURN not configured — using STUN only (may fail on mobile networks)",
+              ? `TURN active — ${turnCount} relay server(s) available (mobile-safe)`
+              : "STUN only — no TURN servers. Mobile calls may fail on strict NATs. Hard-reload if you just added TURN credentials.",
           );
+        } else {
+          addLog("warn", `ICE endpoint returned HTTP ${resp.status} — using built-in STUN fallback`);
         }
       } catch (err) {
-        addLog("warn", `Could not fetch ICE servers — using STUN only: ${(err as Error).message}`);
+        addLog("warn", `ICE endpoint unreachable — using built-in STUN fallback: ${(err as Error).message}`);
       }
 
       try {

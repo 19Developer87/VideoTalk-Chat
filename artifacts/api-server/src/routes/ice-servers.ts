@@ -31,8 +31,17 @@ router.get("/ice-servers", async (req, res) => {
   const apiKey  = process.env["METERED_API_KEY"];
   const appName = process.env["METERED_APP_NAME"];
 
+  // ── Safe diagnostic log — never prints the actual key value ──────────────
+  req.log.info({
+    METERED_API_KEY_present:  Boolean(apiKey),
+    METERED_APP_NAME_present: Boolean(appName),
+    // Mask all but first 3 chars so you can confirm the right key is loaded
+    METERED_APP_NAME_preview: appName  ? `${appName.slice(0, 3)}***`  : "(not set)",
+    METERED_API_KEY_preview:  apiKey   ? `${apiKey.slice(0,  4)}****` : "(not set)",
+  }, "ICE server env check");
+
   if (!apiKey || !appName) {
-    req.log.info("TURN not configured (METERED_API_KEY / METERED_APP_NAME missing) — returning STUN-only");
+    req.log.info("TURN not configured — METERED_API_KEY or METERED_APP_NAME missing, returning STUN-only");
     res.json({ iceServers: STUN_ONLY, turnEnabled: false });
     return;
   }
