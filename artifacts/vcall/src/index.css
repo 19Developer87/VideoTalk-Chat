@@ -78,7 +78,53 @@
   * {
     @apply border-border box-border;
   }
+  /* Use 100% + 100dvh so the app fills exactly the visible viewport on mobile.
+     100dvh responds to the dynamic viewport (hides/shows with browser chrome). */
+  html, body {
+    height: 100%;
+    height: 100dvh;
+  }
+  #root {
+    height: 100%;
+    height: 100dvh;
+  }
   body {
     @apply bg-background text-foreground font-sans antialiased;
   }
+}
+
+/* ── Call-screen layout: safe-area-aware bottom anchoring ─────────────────
+   env(safe-area-inset-bottom) returns the height of the system navigation
+   bar on Android gesture mode and iOS home-bar devices.
+   viewport-fit=cover (in index.html) is required for this to work.
+   Fallback 0px keeps everything unchanged on desktop / older browsers.    */
+
+/* Controls bar — equivalent to bottom-6 (1.5 rem) + system nav bar */
+.call-ctrl-bottom {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 1.5rem);
+}
+
+/* Elements that must clear the controls bar
+   bottom-24 (6 rem) equivalent for device badges                          */
+.call-ctrl-above-24 {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 6rem);
+}
+
+/* bottom-28 (7 rem) equivalent for local video preview + settings panel  */
+.call-ctrl-above-28 {
+  bottom: calc(env(safe-area-inset-bottom, 0px) + 7rem);
+}
+
+/* Inner button row: scrolls horizontally when buttons don't fit.
+   Hides the scrollbar visually but keeps it functional for touch swipe.  */
+.call-controls-inner {
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+  scrollbar-width: none;
+  /* Padding keeps first/last buttons fully reachable at scroll extremes */
+  padding-left: 4px;
+  padding-right: 4px;
+}
+.call-controls-inner::-webkit-scrollbar {
+  display: none;
 }

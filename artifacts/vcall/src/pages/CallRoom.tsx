@@ -455,7 +455,7 @@ export function CallRoom() {
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
-    <div className="relative w-screen h-screen bg-zinc-950 overflow-hidden">
+    <div className="relative w-screen h-[100dvh] bg-zinc-950 overflow-hidden">
 
       {/* Remote video — always mounted; srcObject cleared on permanent disconnect */}
       <video
@@ -650,7 +650,7 @@ export function CallRoom() {
 
       {/* Local video preview — only rendered when a camera is available */}
       {!webrtc.videoOff && devCaps.hasCamera && (
-        <div className="absolute bottom-28 right-4 z-20 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
+        <div className="call-ctrl-above-28 absolute right-4 z-20 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
           <video
             ref={localVideoRef}
             autoPlay
@@ -672,7 +672,7 @@ export function CallRoom() {
 
       {/* Settings panel */}
       {showSettings && (
-        <div className="absolute bottom-28 left-4 z-40 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52">
+        <div className="call-ctrl-above-28 absolute left-4 z-40 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52">
           <h3 className="text-white text-sm font-semibold mb-3">Settings</h3>
           {devCaps.hasCamera ? (
             <>
@@ -699,7 +699,7 @@ export function CallRoom() {
 
       {/* Device capability badges — shown above controls when a device is missing */}
       {devCaps.probed && (!devCaps.hasCamera || !devCaps.hasMicrophone) && (
-        <div className="absolute bottom-24 left-0 right-0 z-20 flex justify-center gap-2 px-4 pointer-events-none">
+        <div className="call-ctrl-above-24 absolute left-0 right-0 z-20 flex justify-center gap-2 px-4 pointer-events-none">
           {!devCaps.hasMicrophone && (
             <span className="flex items-center gap-1.5 text-xs bg-zinc-900/90 backdrop-blur-sm border border-zinc-700 text-zinc-400 px-3 py-1.5 rounded-full">
               <MicOff className="w-3.5 h-3.5 text-zinc-500" />
@@ -715,9 +715,11 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Controls bar */}
-      <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center px-4">
-        <div className="flex items-center gap-3 bg-zinc-900/90 backdrop-blur-md border border-zinc-700 rounded-2xl px-4 py-3 shadow-2xl">
+      {/* Controls bar — call-ctrl-bottom adds safe-area-inset-bottom so the bar
+          clears the Android gesture/button navigation bar on all devices.
+          call-controls-inner enables horizontal scroll when buttons overflow. */}
+      <div className="call-ctrl-bottom absolute left-0 right-0 z-20 flex items-center justify-center px-4">
+        <div className="call-controls-inner flex items-center gap-3 bg-zinc-900/90 backdrop-blur-md border border-zinc-700 rounded-2xl px-4 py-3 shadow-2xl">
 
           {/* Mic button — disabled and permanently muted icon when no microphone */}
           <button
