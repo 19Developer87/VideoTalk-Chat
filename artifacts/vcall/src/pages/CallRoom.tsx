@@ -101,15 +101,15 @@ export function CallRoom() {
       remotePeerRef.current = socketId;
       setPeerName(name);
       setStatus("connecting");
-      setStatusMessage(`${name} joined — creating offer…`);
+      setStatusMessage(`${name} joined — starting call…`);
       try {
         const offer = await webrtc.makeOffer();
         signaling.sendOffer(socketId, offer);
-        setStatusMessage("Offer sent — waiting for answer…");
+        setStatusMessage("Connecting…");
       } catch (err) {
         addLog("error", `makeOffer failed: ${(err as Error).message}`);
         setStatus("error");
-        setStatusMessage("Failed to create connection offer");
+        setStatusMessage("Failed to start the call — please reload and try again.");
       }
     },
 
@@ -117,21 +117,22 @@ export function CallRoom() {
     onOffer: async ({ from, offer }) => {
       remotePeerRef.current = from;
       addLog("info", `Offer received from ${from} — creating answer…`);
-      setStatusMessage("Offer received — creating answer…");
+      setStatusMessage("Connecting…");
       try {
         const answer = await webrtc.makeAnswer(offer);
         signaling.sendAnswer(from, answer);
-        setStatusMessage("Answer sent — connecting…");
+        setStatusMessage("Almost there…");
       } catch (err) {
         addLog("error", `makeAnswer failed: ${(err as Error).message}`);
         setStatus("error");
-        setStatusMessage("Failed to create answer");
+        setStatusMessage("Failed to connect — please reload and try again.");
       }
     },
 
     // HOST receives answer from joiner
     onAnswer: async ({ answer }) => {
       addLog("info", "Answer received — finalising connection…");
+      setStatusMessage("Finalising connection…");
       try {
         await webrtc.receiveAnswer(answer);
       } catch (err) {
@@ -190,6 +191,13 @@ export function CallRoom() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ─── Fix: re-attach srcObject when local video element re-mounts after camera toggle ──
+  useEffect(() => {
+    if (!webrtc.videoOff && localVideoRef.current && webrtc.localStreamRef.current) {
+      localVideoRef.current.srcObject = webrtc.localStreamRef.current;
+    }
+  }, [webrtc.videoOff, webrtc.localStreamRef]);
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
   const copyInvite = useCallback(async () => {
     await navigator.clipboard.writeText(inviteLink);
@@ -239,51 +247,93 @@ export function CallRoom() {
 
       {/* Waiting / Error overlay */}
       {status !== "connected" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 z-10">
-          <div className="text-center max-w-sm px-6">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 z-10 px-6">
+          <div className="text-center w-full max-w-sm">
+
+            {/* Icon */}
             {(status === "error" || status === "full") ? (
-              <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-4">
+              <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-5">
                 <WifiOff className="w-8 h-8 text-red-400" />
               </div>
             ) : status === "waiting" ? (
-              <div className="w-16 h-16 rounded-full bg-blue-500/20 flex items-center justify-center mx-auto mb-4">
+              <div className="w-16 h-16 rounded-full bg-blue-500/20 flex items-center justify-center mx-auto mb-5">
                 <Users className="w-8 h-8 text-blue-400" />
               </div>
             ) : (
-              <div className="w-16 h-16 rounded-full bg-violet-500/20 flex items-center justify-center mx-auto mb-4">
+              <div className="w-16 h-16 rounded-full bg-violet-500/20 flex items-center justify-center mx-auto mb-5">
                 <Loader2 className="w-8 h-8 text-violet-400 animate-spin" />
               </div>
             )}
 
-            <h2 className="text-white text-xl font-semibold mb-2">
-              {status === "waiting" ? "Waiting for peer…" : statusMessage}
+            {/* Heading */}
+            <h2 className="text-white text-xl font-semibold mb-1">
+              {status === "waiting"  ? "Waiting for someone to join" :
+               status === "error"    ? "Something went wrong" :
+               status === "full"     ? "Room is full" :
+               status === "disconnected" ? "Call ended" :
+               "Connecting…"}
             </h2>
 
+            {/* Sub-text */}
+            <p className="text-zinc-400 text-sm mb-5">{statusMessage}</p>
+
+            {/* Waiting — invite link */}
             {status === "waiting" && (
-              <div className="mt-4 space-y-3">
-                <p className="text-zinc-400 text-sm">Share this link to invite someone:</p>
-                <div className="flex items-center gap-2 bg-zinc-800 rounded-xl px-3 py-2.5 border border-zinc-700">
-                  <span className="text-zinc-300 text-xs font-mono flex-1 overflow-x-auto whitespace-nowrap">
+              <div className="space-y-3 text-left">
+                <p className="text-zinc-400 text-sm text-center">Send this link to the other person:</p>
+                <div className="flex items-center gap-2 bg-zinc-800 rounded-xl px-3 py-3 border border-zinc-700">
+                  <span className="text-zinc-200 text-xs font-mono flex-1 overflow-x-auto whitespace-nowrap pr-1">
                     {inviteLink}
                   </span>
-                  <button onClick={copyInvite} className="shrink-0 text-violet-400 hover:text-violet-300 transition">
-                    {copied ? <CheckCheck className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
+                  <button
+                    onClick={copyInvite}
+                    className="shrink-0 flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition"
+                  >
+                    {copied
+                      ? <><CheckCheck className="w-3.5 h-3.5" /> Copied</>
+                      : <><Copy className="w-3.5 h-3.5" /> Copy</>}
                   </button>
                 </div>
-                <span className="inline-block text-zinc-600 text-xs font-mono bg-zinc-800 px-3 py-1 rounded-lg border border-zinc-700">
-                  Room: {roomId}
-                </span>
+                <p className="text-center text-zinc-600 text-xs font-mono">Room ID: {roomId}</p>
               </div>
             )}
 
-            {(status === "error" || status === "full") && (
+            {/* Error — actionable help */}
+            {status === "error" && (
+              <div className="space-y-3">
+                {statusMessage.includes("permission") || statusMessage.includes("denied") ? (
+                  <div className="bg-zinc-800/80 border border-zinc-700 rounded-xl p-4 text-left space-y-2">
+                    <p className="text-zinc-300 text-sm font-medium">How to fix this:</p>
+                    <ol className="text-zinc-400 text-sm space-y-1 list-decimal list-inside">
+                      <li>Tap the camera icon in your browser's address bar</li>
+                      <li>Set Camera and Microphone to <strong className="text-white">Allow</strong></li>
+                      <li>Reload this page</li>
+                    </ol>
+                  </div>
+                ) : statusMessage.includes("No camera") ? (
+                  <div className="bg-zinc-800/80 border border-zinc-700 rounded-xl p-4 text-left">
+                    <p className="text-zinc-400 text-sm">Make sure your camera and microphone are plugged in and not used by another app, then reload.</p>
+                  </div>
+                ) : null}
+                <button
+                  onClick={() => navigate("/")}
+                  className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-sm font-medium transition border border-zinc-700"
+                >
+                  Back to Home
+                </button>
+              </div>
+            )}
+
+            {/* Full / disconnected */}
+            {(status === "full" || status === "disconnected") && (
               <button
                 onClick={() => navigate("/")}
-                className="mt-6 px-6 py-2.5 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-sm transition border border-zinc-700"
+                className="w-full py-3 bg-zinc-800 hover:bg-zinc-700 text-white rounded-xl text-sm font-medium transition border border-zinc-700"
               >
                 Back to Home
               </button>
             )}
+
           </div>
         </div>
       )}
