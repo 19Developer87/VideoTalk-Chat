@@ -227,7 +227,7 @@ export function CallRoom() {
               <div className="mt-4 space-y-3">
                 <p className="text-zinc-400 text-sm">Share this link to invite someone:</p>
                 <div className="flex items-center gap-2 bg-zinc-800 rounded-xl px-3 py-2.5 border border-zinc-700">
-                  <span className="text-zinc-300 text-xs truncate flex-1 font-mono">{inviteLink}</span>
+                  <span className="text-zinc-300 text-xs font-mono flex-1 overflow-x-auto whitespace-nowrap scrollbar-thin scrollbar-thumb-zinc-600 scrollbar-track-transparent">{inviteLink}</span>
                   <button
                     onClick={copyInvite}
                     className="shrink-0 text-violet-400 hover:text-violet-300 transition"
