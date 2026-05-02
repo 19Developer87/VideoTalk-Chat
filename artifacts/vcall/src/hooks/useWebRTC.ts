@@ -53,6 +53,9 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
   const callbacksRef       = useRef(callbacks);
   callbacksRef.current     = callbacks;
 
+  // ICE servers — starts with STUN-only; updated by CallRoom once /api/ice-servers responds
+  const iceServersRef = useRef<RTCIceServer[]>(ICE_SERVERS);
+
   // Grace timer: started on ICE "disconnected", cleared on recovery or failure
   const iceGraceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -99,8 +102,8 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     remoteDescSet.current   = false;
     iceCandidateBuf.current = [];
 
-    log("info", "RTCPeerConnection created (STUN: Google)");
-    const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
+    log("info", `RTCPeerConnection created — ${iceServersRef.current.length} ICE server(s)`);
+    const pc = new RTCPeerConnection({ iceServers: iceServersRef.current });
     pcRef.current = pc;
 
     pc.onicecandidate = (ev) => {
@@ -345,9 +348,19 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     }
   }, [log]);
 
+  // Allow CallRoom to push fetched TURN credentials before buildPC is called
+  const updateIceServers = useCallback((servers: RTCIceServer[]) => {
+    iceServersRef.current = servers;
+    const turnCount = servers.filter(s =>
+      (Array.isArray(s.urls) ? s.urls : [s.urls]).some(u => u.startsWith("turn:") || u.startsWith("turns:"))
+    ).length;
+    log("success", `ICE servers updated — ${servers.length} total, ${turnCount} TURN`);
+  }, [log]);
+
   return {
     localStreamRef,
     getLocalStream,
+    updateIceServers,
     makeOffer,
     makeIceRestartOffer,
     makeAnswer,

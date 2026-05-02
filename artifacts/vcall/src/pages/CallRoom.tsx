@@ -227,6 +227,28 @@ export function CallRoom() {
   useEffect(() => {
     (async () => {
       addLog("info", `Frontend loaded — room:${roomId} name:${displayName}`);
+
+      // Fetch ICE servers (includes TURN credentials if configured on the server).
+      // Must happen before joinRoom so buildPC uses the right servers.
+      try {
+        const resp = await fetch("/api/ice-servers");
+        if (resp.ok) {
+          const { iceServers, turnEnabled } = await resp.json() as {
+            iceServers: RTCIceServer[];
+            turnEnabled: boolean;
+          };
+          webrtc.updateIceServers(iceServers);
+          addLog(
+            turnEnabled ? "success" : "info",
+            turnEnabled
+              ? `TURN enabled — ${iceServers.length} ICE server(s) loaded`
+              : "TURN not configured — using STUN only (may fail on mobile networks)",
+          );
+        }
+      } catch (err) {
+        addLog("warn", `Could not fetch ICE servers — using STUN only: ${(err as Error).message}`);
+      }
+
       try {
         const stream = await webrtc.getLocalStream("medium");
         if (localVideoRef.current) {
