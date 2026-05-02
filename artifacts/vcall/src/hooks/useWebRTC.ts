@@ -414,8 +414,17 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
 
   const enablePiP = useCallback(async (el: HTMLVideoElement) => {
     try {
-      if (document.pictureInPictureElement) await document.exitPictureInPicture();
-      else await el.requestPictureInPicture();
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else {
+        // Blur the focused element BEFORE entering PiP so that a remote-control
+        // OK/Enter press that lands while PiP is opening cannot fire the button
+        // that still holds focus (e.g. the Hang Up button).
+        if (document.activeElement instanceof HTMLElement) {
+          document.activeElement.blur();
+        }
+        await el.requestPictureInPicture();
+      }
     } catch (err) {
       log("error", `PiP: ${(err as Error).message}`);
     }
