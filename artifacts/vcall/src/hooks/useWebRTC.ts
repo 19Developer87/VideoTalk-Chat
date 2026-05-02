@@ -210,14 +210,60 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     });
   }, [log]);
 
-  // ─── Get local camera + mic ──────────────────────────────────────────────────
-  const getLocalStream = useCallback(async (q: VideoQuality = "medium"): Promise<MediaStream> => {
+  // ─── Get local camera + mic (with graceful fallback) ─────────────────────────
+  // opts.wantVideo / opts.wantAudio default to true.
+  // If a device is absent or throws a non-permission error the cascade degrades:
+  //   audio+video → video-only → audio-only → null (receive-only)
+  // NotAllowedError / PermissionDeniedError is always re-thrown — those are fatal.
+  const getLocalStream = useCallback(async (
+    q: VideoQuality = "medium",
+    opts: { wantVideo?: boolean; wantAudio?: boolean } = {},
+  ): Promise<MediaStream | null> => {
+    const wantVideo = opts.wantVideo ?? true;
+    const wantAudio = opts.wantAudio ?? true;
+
     localStreamRef.current?.getTracks().forEach(t => t.stop());
-    log("info", `getUserMedia — quality:${q}`);
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: QUALITY_CONSTRAINTS[q],
-      audio: true,
-    });
+    localStreamRef.current = null;
+
+    if (!wantVideo && !wantAudio) {
+      log("info", "No local media requested — joining in receive-only mode");
+      setDebugInfo(d => ({ ...d, localVideo: false, localAudio: false }));
+      return null;
+    }
+
+    // Build attempt list: most capable first, degrade on each non-fatal failure
+    const attempts: MediaStreamConstraints[] = [];
+    if (wantVideo && wantAudio) {
+      attempts.push({ video: QUALITY_CONSTRAINTS[q], audio: true  });
+      attempts.push({ video: QUALITY_CONSTRAINTS[q], audio: false });
+      attempts.push({ video: false,                  audio: true  });
+    } else if (wantVideo) {
+      attempts.push({ video: QUALITY_CONSTRAINTS[q], audio: false });
+    } else {
+      attempts.push({ video: false, audio: true });
+    }
+
+    let stream: MediaStream | null = null;
+    for (const constraints of attempts) {
+      try {
+        log("info", `getUserMedia — video:${!!constraints.video} audio:${!!constraints.audio} quality:${q}`);
+        stream = await navigator.mediaDevices.getUserMedia(constraints);
+        break;
+      } catch (err) {
+        const name = (err as { name?: string }).name ?? "UnknownError";
+        if (name === "NotAllowedError" || name === "PermissionDeniedError") {
+          throw err; // user denied permission — fatal, do not retry
+        }
+        log("warn", `getUserMedia failed (${name}) — trying next fallback`);
+      }
+    }
+
+    if (!stream) {
+      log("warn", "All getUserMedia attempts exhausted — receive-only mode");
+      setDebugInfo(d => ({ ...d, localVideo: false, localAudio: false }));
+      return null;
+    }
+
     localStreamRef.current = stream;
     const hasV = stream.getVideoTracks().length > 0;
     const hasA = stream.getAudioTracks().length > 0;
@@ -334,8 +380,17 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
 
   const changeQuality = useCallback(async (q: VideoQuality) => {
     setQuality(q);
+    // Guard: if there's no active video stream, quality change is a no-op
+    const current = localStreamRef.current;
+    if (!current) {
+      log("warn", "changeQuality: no local stream active — skipping (receive-only mode)");
+      return;
+    }
+    const hadVideo = current.getVideoTracks().length > 0;
+    const hadAudio = current.getAudioTracks().length > 0;
     try {
-      const stream = await getLocalStream(q);
+      const stream = await getLocalStream(q, { wantVideo: hadVideo, wantAudio: hadAudio });
+      if (!stream) { log("warn", "changeQuality: getLocalStream returned null"); return; }
       const sender = pcRef.current?.getSenders().find(s => s.track?.kind === "video");
       const vTrack = stream.getVideoTracks()[0];
       if (sender && vTrack) { await sender.replaceTrack(vTrack); }

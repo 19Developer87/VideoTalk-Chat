@@ -30,6 +30,15 @@ export function CallRoom() {
   const [copiedCode,    setCopiedCode   ] = useState(false);
   const [logs,          setLogs         ] = useState<LogEntry[]>([]);
 
+  // ─── Device capabilities ─────────────────────────────────────────────────────
+  // Probed via enumerateDevices() before requesting getUserMedia.
+  // Drives fallback: video-only / audio-only / receive-only modes.
+  const [devCaps, setDevCaps] = useState({
+    hasCamera:    true,   // optimistic until probed
+    hasMicrophone: true,
+    probed:       false,
+  });
+
   // ─── Call quality indicator ──────────────────────────────────────────────────
   type CallQuality = "excellent" | "good" | "fair" | "poor";
   const [callQuality, setCallQuality] = useState<CallQuality | null>(null);
@@ -250,6 +259,25 @@ export function CallRoom() {
       // Persist room ID so the Lobby can pre-fill it next time (covers direct-URL access)
       if (roomId) localStorage.setItem("lastRoomId", roomId);
 
+      // ── Probe device capabilities before requesting access ──────────────────
+      // enumerateDevices() always returns device *kinds* regardless of permission,
+      // so we can detect absent hardware without triggering a permission dialog.
+      let hasCamera    = true;
+      let hasMicrophone = true;
+      try {
+        const rawDevices = await navigator.mediaDevices.enumerateDevices();
+        hasCamera    = rawDevices.some(d => d.kind === "videoinput");
+        hasMicrophone = rawDevices.some(d => d.kind === "audioinput");
+        setDevCaps({ hasCamera, hasMicrophone, probed: true });
+        addLog("info", `Devices — camera:${hasCamera} mic:${hasMicrophone}`);
+        if (!hasCamera)    addLog("warn", "No camera detected — video disabled");
+        if (!hasMicrophone) addLog("warn", "No microphone detected — audio disabled");
+      } catch {
+        // enumerateDevices not supported on this browser/platform — assume full capability
+        addLog("info", "Device probe skipped — assuming full media capability");
+        setDevCaps({ hasCamera: true, hasMicrophone: true, probed: true });
+      }
+
       // Fetch ICE servers (includes TURN credentials if configured on the server).
       // Must happen before joinRoom so buildPC uses the right servers.
       try {
@@ -280,25 +308,36 @@ export function CallRoom() {
         addLog("warn", `ICE endpoint unreachable — using built-in STUN fallback: ${(err as Error).message}`);
       }
 
+      // ── Acquire local media — gracefully degrades on missing hardware ──────────
+      // Pass probed capabilities so the cascade starts at the right level.
+      // A null return means receive-only mode — we still join the room.
       try {
-        const stream = await webrtc.getLocalStream("medium");
-        if (localVideoRef.current) {
+        const stream = await webrtc.getLocalStream("medium", {
+          wantVideo: hasCamera,
+          wantAudio: hasMicrophone,
+        });
+        if (stream && localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
           addLog("success", "Local preview attached to video element");
+        } else if (!stream) {
+          addLog("info", "No local media — joining as receive-only viewer");
         }
-        signaling.joinRoom(roomId!, displayName);
       } catch (err: unknown) {
         const e = err as { name?: string; message?: string };
-        const isPerms    = e.name === "NotAllowedError" || e.name === "PermissionDeniedError";
-        const isNotFound = e.name === "NotFoundError";
-        setStatus("error");
-        setStatusMessage(
-          isPerms    ? "Camera/microphone permission denied — allow access and reload." :
-          isNotFound ? "No camera or microphone found on this device." :
-                       "Could not access camera/microphone."
-        );
-        addLog("error", `Media error [${e.name}]: ${e.message}`);
+        const isPerms = e.name === "NotAllowedError" || e.name === "PermissionDeniedError";
+        addLog("error", `Media error [${e.name ?? "?"}]: ${e.message}`);
+        if (isPerms) {
+          // Permission denial is the only truly fatal media error
+          setStatus("error");
+          setStatusMessage("Camera/microphone permission denied — allow access and reload.");
+          return; // exit IIFE — do not join
+        }
+        // Any other error (e.g. device in use): still join in receive-only mode
+        addLog("warn", "Media unavailable — joining in receive-only mode");
       }
+
+      // Always join — receive-only devices still receive remote audio/video
+      signaling.joinRoom(roomId!, displayName);
     })();
 
     return () => {
@@ -609,8 +648,8 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Local video preview */}
-      {!webrtc.videoOff && (
+      {/* Local video preview — only rendered when a camera is available */}
+      {!webrtc.videoOff && devCaps.hasCamera && (
         <div className="absolute bottom-28 right-4 z-20 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
           <video
             ref={localVideoRef}
@@ -635,20 +674,44 @@ export function CallRoom() {
       {showSettings && (
         <div className="absolute bottom-28 left-4 z-40 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52">
           <h3 className="text-white text-sm font-semibold mb-3">Settings</h3>
-          <p className="text-zinc-400 text-xs uppercase tracking-wider mb-2">Video Quality</p>
-          <div className="space-y-1.5">
-            {(["low", "medium", "high"] as VideoQuality[]).map((q) => (
-              <button
-                key={q}
-                onClick={() => handleQualityChange(q)}
-                className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
-                  webrtc.quality === q ? "bg-violet-600 text-white" : "text-zinc-300 hover:bg-zinc-800"
-                }`}
-              >
-                {q === "low" ? "Low (480p)" : q === "medium" ? "Medium (720p)" : "High (1080p)"}
-              </button>
-            ))}
-          </div>
+          {devCaps.hasCamera ? (
+            <>
+              <p className="text-zinc-400 text-xs uppercase tracking-wider mb-2">Video Quality</p>
+              <div className="space-y-1.5">
+                {(["low", "medium", "high"] as VideoQuality[]).map((q) => (
+                  <button
+                    key={q}
+                    onClick={() => handleQualityChange(q)}
+                    className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
+                      webrtc.quality === q ? "bg-violet-600 text-white" : "text-zinc-300 hover:bg-zinc-800"
+                    }`}
+                  >
+                    {q === "low" ? "Low (480p)" : q === "medium" ? "Medium (720p)" : "High (1080p)"}
+                  </button>
+                ))}
+              </div>
+            </>
+          ) : (
+            <p className="text-zinc-500 text-sm">No camera available — video quality settings are disabled.</p>
+          )}
+        </div>
+      )}
+
+      {/* Device capability badges — shown above controls when a device is missing */}
+      {devCaps.probed && (!devCaps.hasCamera || !devCaps.hasMicrophone) && (
+        <div className="absolute bottom-24 left-0 right-0 z-20 flex justify-center gap-2 px-4 pointer-events-none">
+          {!devCaps.hasMicrophone && (
+            <span className="flex items-center gap-1.5 text-xs bg-zinc-900/90 backdrop-blur-sm border border-zinc-700 text-zinc-400 px-3 py-1.5 rounded-full">
+              <MicOff className="w-3.5 h-3.5 text-zinc-500" />
+              No microphone
+            </span>
+          )}
+          {!devCaps.hasCamera && (
+            <span className="flex items-center gap-1.5 text-xs bg-zinc-900/90 backdrop-blur-sm border border-zinc-700 text-zinc-400 px-3 py-1.5 rounded-full">
+              <VideoOff className="w-3.5 h-3.5 text-zinc-500" />
+              No camera
+            </span>
+          )}
         </div>
       )}
 
@@ -656,24 +719,40 @@ export function CallRoom() {
       <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center px-4">
         <div className="flex items-center gap-3 bg-zinc-900/90 backdrop-blur-md border border-zinc-700 rounded-2xl px-4 py-3 shadow-2xl">
 
+          {/* Mic button — disabled and permanently muted icon when no microphone */}
           <button
-            onClick={webrtc.toggleAudio}
+            onClick={devCaps.hasMicrophone ? webrtc.toggleAudio : undefined}
+            disabled={!devCaps.hasMicrophone}
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
-              webrtc.audioMuted ? "bg-red-500/20 text-red-400 border border-red-500/40" : "bg-zinc-800 text-white hover:bg-zinc-700"
+              !devCaps.hasMicrophone
+                ? "bg-zinc-800/50 text-zinc-600 cursor-not-allowed"
+                : webrtc.audioMuted
+                  ? "bg-red-500/20 text-red-400 border border-red-500/40"
+                  : "bg-zinc-800 text-white hover:bg-zinc-700"
             }`}
-            title={webrtc.audioMuted ? "Unmute" : "Mute"}
+            title={!devCaps.hasMicrophone ? "No microphone detected" : webrtc.audioMuted ? "Unmute" : "Mute"}
           >
-            {webrtc.audioMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
+            {!devCaps.hasMicrophone || webrtc.audioMuted
+              ? <MicOff className="w-5 h-5" />
+              : <Mic   className="w-5 h-5" />}
           </button>
 
+          {/* Camera button — disabled and crossed-camera icon when no camera */}
           <button
-            onClick={webrtc.toggleVideo}
+            onClick={devCaps.hasCamera ? webrtc.toggleVideo : undefined}
+            disabled={!devCaps.hasCamera}
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
-              webrtc.videoOff ? "bg-red-500/20 text-red-400 border border-red-500/40" : "bg-zinc-800 text-white hover:bg-zinc-700"
+              !devCaps.hasCamera
+                ? "bg-zinc-800/50 text-zinc-600 cursor-not-allowed"
+                : webrtc.videoOff
+                  ? "bg-red-500/20 text-red-400 border border-red-500/40"
+                  : "bg-zinc-800 text-white hover:bg-zinc-700"
             }`}
-            title={webrtc.videoOff ? "Turn camera on" : "Turn camera off"}
+            title={!devCaps.hasCamera ? "No camera detected" : webrtc.videoOff ? "Turn camera on" : "Turn camera off"}
           >
-            {webrtc.videoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
+            {!devCaps.hasCamera || webrtc.videoOff
+              ? <VideoOff className="w-5 h-5" />
+              : <Video    className="w-5 h-5" />}
           </button>
 
           <button
