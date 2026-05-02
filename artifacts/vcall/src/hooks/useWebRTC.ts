@@ -20,6 +20,7 @@ export interface WebRTCHandlers {
   onIceCandidate: (candidate: RTCIceCandidateInit) => void;
   onRemoteStream: (stream: MediaStream) => void;
   onConnectionStateChange: (state: RTCPeerConnectionState) => void;
+  onLog?: (level: "info" | "success" | "warn" | "error", msg: string) => void;
 }
 
 export function useWebRTC(handlers: WebRTCHandlers) {
@@ -31,16 +32,23 @@ export function useWebRTC(handlers: WebRTCHandlers) {
   const handlersRef = useRef(handlers);
   handlersRef.current = handlers;
 
+  const log = (level: "info" | "success" | "warn" | "error", msg: string) => {
+    handlersRef.current.onLog?.(level, msg);
+  };
+
   const getLocalStream = useCallback(async (videoQuality: VideoQuality = "medium"): Promise<MediaStream> => {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(t => t.stop());
     }
+    log("info", `Requesting camera/mic — quality: ${videoQuality}`);
     const stream = await navigator.mediaDevices.getUserMedia({
       video: QUALITY_CONSTRAINTS[videoQuality],
       audio: true,
     });
+    log("success", `Local stream acquired — tracks: ${stream.getTracks().map(t => t.kind).join(", ")}`);
     localStreamRef.current = stream;
     return stream;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const createPeerConnection = useCallback((onOffer?: (offer: RTCSessionDescriptionInit) => void) => {
@@ -48,59 +56,69 @@ export function useWebRTC(handlers: WebRTCHandlers) {
       pcRef.current.close();
     }
 
+    log("info", "Creating RTCPeerConnection with Google STUN servers");
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pcRef.current = pc;
 
     pc.onicecandidate = (event) => {
       if (event.candidate) {
+        log("info", `ICE candidate gathered — type: ${event.candidate.type ?? "host"}, protocol: ${event.candidate.protocol}`);
         handlersRef.current.onIceCandidate(event.candidate.toJSON());
+      } else {
+        log("info", "ICE gathering complete");
       }
     };
 
     pc.ontrack = (event) => {
       const [remoteStream] = event.streams;
       if (remoteStream) {
+        log("success", `Remote track received — kind: ${event.track.kind}`);
         handlersRef.current.onRemoteStream(remoteStream);
       }
     };
 
     pc.onconnectionstatechange = () => {
-      console.log("[WebRTC] Connection state:", pc.connectionState);
-      handlersRef.current.onConnectionStateChange(pc.connectionState);
+      const state = pc.connectionState;
+      const level = state === "connected" ? "success" : state === "failed" || state === "closed" ? "error" : "info";
+      log(level, `WebRTC connection state → ${state}`);
+      handlersRef.current.onConnectionStateChange(state);
+    };
+
+    pc.onicegatheringstatechange = () => {
+      log("info", `ICE gathering state → ${pc.iceGatheringState}`);
+    };
+
+    pc.onsignalingstatechange = () => {
+      log("info", `Signaling state → ${pc.signalingState}`);
     };
 
     pc.onnegotiationneeded = async () => {
       if (onOffer) {
         try {
+          log("info", "Negotiation needed — creating offer");
           const offer = await pc.createOffer();
           await pc.setLocalDescription(offer);
+          log("info", "Local description set (offer) — sending to peer");
           onOffer(pc.localDescription!);
         } catch (err) {
-          console.error("[WebRTC] Negotiation error:", err);
+          log("error", `Negotiation error: ${(err as Error).message}`);
         }
       }
     };
 
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, localStreamRef.current!);
-      });
-    }
-
     return pc;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  const startCall = useCallback(async (quality: VideoQuality = "medium") => {
-    await getLocalStream(quality);
-  }, [getLocalStream]);
 
   const createOffer = useCallback(async (onOfferReady: (offer: RTCSessionDescriptionInit) => void) => {
     const pc = createPeerConnection(onOfferReady);
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         pc.addTrack(track, localStreamRef.current!);
+        log("info", `Added local ${track.kind} track to peer connection`);
       });
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createPeerConnection]);
 
   const handleOffer = useCallback(async (offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> => {
@@ -108,26 +126,36 @@ export function useWebRTC(handlers: WebRTCHandlers) {
     if (localStreamRef.current) {
       localStreamRef.current.getTracks().forEach(track => {
         pc.addTrack(track, localStreamRef.current!);
+        log("info", `Added local ${track.kind} track to peer connection`);
       });
     }
+    log("info", "Setting remote description (offer)");
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
+    log("info", "Creating answer");
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
+    log("info", "Local description set (answer) — sending back");
     return pc.localDescription!;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [createPeerConnection]);
 
   const handleAnswer = useCallback(async (answer: RTCSessionDescriptionInit) => {
     if (!pcRef.current) return;
+    log("info", "Setting remote description (answer)");
     await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+    log("success", "Remote description set — negotiation complete");
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const addIceCandidate = useCallback(async (candidate: RTCIceCandidateInit) => {
     if (!pcRef.current) return;
     try {
       await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
+      log("info", "Remote ICE candidate added");
     } catch (err) {
-      console.error("[WebRTC] Error adding ICE candidate:", err);
+      log("error", `Failed to add ICE candidate: ${(err as Error).message}`);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const toggleAudio = useCallback(() => {
@@ -155,17 +183,21 @@ export function useWebRTC(handlers: WebRTCHandlers) {
       const sender = pcRef.current.getSenders().find(s => s.track?.kind === "video");
       if (sender && videoTrack) {
         await sender.replaceTrack(videoTrack);
+        log("success", `Video quality changed to ${newQuality}`);
       }
     } catch (err) {
-      console.error("[WebRTC] Quality change error:", err);
+      log("error", `Quality change error: ${(err as Error).message}`);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [getLocalStream]);
 
   const hangUp = useCallback(() => {
+    log("warn", "Hanging up — closing peer connection and stopping tracks");
     pcRef.current?.close();
     pcRef.current = null;
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const enablePictureInPicture = useCallback(async (videoEl: HTMLVideoElement) => {
@@ -176,13 +208,13 @@ export function useWebRTC(handlers: WebRTCHandlers) {
         await videoEl.requestPictureInPicture();
       }
     } catch (err) {
-      console.error("[WebRTC] PiP error:", err);
+      log("error", `PiP error: ${(err as Error).message}`);
     }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return {
     localStreamRef,
-    startCall,
     getLocalStream,
     createOffer,
     handleOffer,

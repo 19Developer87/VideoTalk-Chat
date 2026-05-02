@@ -2,12 +2,18 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
 import { useSignaling } from "@/hooks/useSignaling";
 import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
+import { DebugLog, LogEntry } from "@/components/DebugLog";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
-  PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users
+  PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users,
+  Terminal
 } from "lucide-react";
 
 type ConnectionStatus = "connecting" | "waiting" | "connected" | "disconnected" | "error" | "full";
+
+function timestamp(): string {
+  return new Date().toLocaleTimeString("en-GB", { hour12: false });
+}
 
 export function CallRoom() {
   const { roomId } = useParams<{ roomId: string }>();
@@ -17,15 +23,19 @@ export function CallRoom() {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [statusMessage, setStatusMessage] = useState("Connecting to server…");
   const [showSettings, setShowSettings] = useState(false);
+  const [showDebug, setShowDebug] = useState(true);
   const [copied, setCopied] = useState(false);
-  const [isInitiator, setIsInitiator] = useState(false);
-  const [remotePeerId, setRemotePeerId] = useState<string | null>(null);
+  const [logs, setLogs] = useState<LogEntry[]>([]);
 
   const localVideoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remotePeerIdRef = useRef<string | null>(null);
 
   const inviteLink = `${window.location.origin}/?room=${roomId}`;
+
+  const addLog = useCallback((level: LogEntry["level"], msg: string) => {
+    setLogs(prev => [...prev, { time: timestamp(), level, msg }]);
+  }, []);
 
   const webrtc = useWebRTC({
     onOffer: () => {},
@@ -50,12 +60,12 @@ export function CallRoom() {
         setStatusMessage("Connected");
       }
     },
+    onLog: addLog,
   });
 
   const signaling = useSignaling({
-    onJoinedRoom: async ({ peers, isInitiator: init }) => {
-      setIsInitiator(init);
-      if (init) {
+    onJoinedRoom: async ({ peers, isInitiator }) => {
+      if (isInitiator) {
         setStatus("waiting");
         setStatusMessage("Waiting for someone to join…");
       } else {
@@ -64,7 +74,6 @@ export function CallRoom() {
         if (peers.length > 0) {
           const peer = peers[0];
           remotePeerIdRef.current = peer.socketId;
-          setRemotePeerId(peer.socketId);
           setPeerName(peer.displayName);
           const offer = await new Promise<RTCSessionDescriptionInit>((resolve) => {
             webrtc.createOffer(resolve);
@@ -74,9 +83,8 @@ export function CallRoom() {
         }
       }
     },
-    onPeerJoined: async ({ socketId, displayName: name }) => {
+    onPeerJoined: ({ socketId, displayName: name }) => {
       remotePeerIdRef.current = socketId;
-      setRemotePeerId(socketId);
       setPeerName(name);
       setStatus("connecting");
       setStatusMessage(`${name} joined — establishing connection…`);
@@ -86,12 +94,10 @@ export function CallRoom() {
       setStatusMessage("Peer left the call");
       setPeerName("");
       remotePeerIdRef.current = null;
-      setRemotePeerId(null);
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     },
     onOffer: async ({ from, offer }) => {
       remotePeerIdRef.current = from;
-      setRemotePeerId(from);
       const answer = await webrtc.handleOffer(offer);
       signaling.sendAnswer(from, answer);
       setStatusMessage("Sending answer…");
@@ -106,32 +112,31 @@ export function CallRoom() {
       setStatus("full");
       setStatusMessage("Room is full (max 2 people)");
     },
+    onLog: addLog,
   });
 
   useEffect(() => {
-    let joined = false;
     const init = async () => {
       try {
         const stream = await webrtc.getLocalStream("medium");
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
         }
-        if (!joined) {
-          joined = true;
-          signaling.joinRoom(roomId!, displayName);
-        }
+        signaling.joinRoom(roomId!, displayName);
       } catch (err: unknown) {
-        console.error("[CallRoom] Media error:", err);
-        const error = err as { name?: string };
+        const error = err as { name?: string; message?: string };
         if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
           setStatus("error");
           setStatusMessage("Camera/microphone permission denied. Please allow access and reload.");
+          addLog("error", `Permission denied: ${error.message}`);
         } else if (error.name === "NotFoundError") {
           setStatus("error");
           setStatusMessage("No camera or microphone found on this device.");
+          addLog("error", `Device not found: ${error.message}`);
         } else {
           setStatus("error");
           setStatusMessage("Could not access camera/microphone.");
+          addLog("error", `Media error: ${error.message}`);
         }
       }
     };
@@ -196,7 +201,7 @@ export function CallRoom() {
         className="absolute inset-0 w-full h-full object-cover"
       />
 
-      {/* Waiting/Error overlay */}
+      {/* Waiting / Error overlay */}
       {status !== "connected" && (
         <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950">
           <div className="text-center max-w-sm px-6">
@@ -250,7 +255,12 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Peer name overlay */}
+      {/* Debug log panel */}
+      {showDebug && (
+        <DebugLog entries={logs} onClose={() => setShowDebug(false)} />
+      )}
+
+      {/* Peer name */}
       {status === "connected" && peerName && (
         <div className="absolute top-4 left-4 bg-black/40 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
@@ -258,7 +268,7 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Local video — picture-in-picture corner */}
+      {/* Local video */}
       <div className="absolute bottom-28 right-4 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
         <video
           ref={localVideoRef}
@@ -277,7 +287,7 @@ export function CallRoom() {
         </div>
       </div>
 
-      {/* Status bar */}
+      {/* Status indicator */}
       <div className={`absolute top-4 right-4 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]}`}>
         <StatusIcon />
         <span>{statusMessage}</span>
@@ -285,10 +295,10 @@ export function CallRoom() {
 
       {/* Settings panel */}
       {showSettings && (
-        <div className="absolute bottom-28 left-4 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52">
+        <div className="absolute bottom-28 left-4 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52 z-40">
           <h3 className="text-white text-sm font-semibold mb-3">Settings</h3>
-          <div className="space-y-2">
-            <p className="text-zinc-400 text-xs uppercase tracking-wider mb-2">Video Quality</p>
+          <p className="text-zinc-400 text-xs uppercase tracking-wider mb-2">Video Quality</p>
+          <div className="space-y-1.5">
             {(["low", "medium", "high"] as VideoQuality[]).map((q) => (
               <button
                 key={q}
@@ -363,6 +373,17 @@ export function CallRoom() {
               <PictureInPicture2 className="w-5 h-5" />
             </button>
           )}
+
+          {/* Debug toggle */}
+          <button
+            onClick={() => setShowDebug(s => !s)}
+            className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
+              showDebug ? "bg-violet-600 text-white" : "bg-zinc-800 text-white hover:bg-zinc-700"
+            }`}
+            title="Toggle debug log"
+          >
+            <Terminal className="w-5 h-5" />
+          </button>
 
           {/* Settings */}
           <button
