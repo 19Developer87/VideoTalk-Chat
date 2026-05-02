@@ -268,24 +268,21 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Local video */}
-      <div className="absolute bottom-28 right-4 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
-        <video
-          ref={localVideoRef}
-          autoPlay
-          playsInline
-          muted
-          className={`w-full h-full object-cover scale-x-[-1] ${webrtc.videoOff ? "hidden" : ""}`}
-        />
-        {webrtc.videoOff && (
-          <div className="w-full h-full flex items-center justify-center bg-zinc-800">
-            <VideoOff className="w-8 h-8 text-zinc-500" />
+      {/* Local video — hidden entirely when camera is off */}
+      {!webrtc.videoOff && (
+        <div className="absolute bottom-28 right-4 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
+          <video
+            ref={localVideoRef}
+            autoPlay
+            playsInline
+            muted
+            className="w-full h-full object-cover scale-x-[-1]"
+          />
+          <div className="absolute bottom-2 left-0 right-0 text-center">
+            <span className="text-white text-xs font-medium bg-black/50 px-2 py-0.5 rounded-full">You</span>
           </div>
-        )}
-        <div className="absolute bottom-2 left-0 right-0 text-center">
-          <span className="text-white text-xs font-medium bg-black/50 px-2 py-0.5 rounded-full">You</span>
         </div>
-      </div>
+      )}
 
       {/* Status indicator */}
       <div className={`absolute top-4 right-4 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]}`}>
