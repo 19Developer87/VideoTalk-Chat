@@ -34,6 +34,10 @@ export function CallRoom() {
   const [callQuality, setCallQuality] = useState<CallQuality | null>(null);
   const [callStats,   setCallStats  ] = useState<{ rtt: number | null; packetLoss: number | null }>({ rtt: null, packetLoss: null });
 
+  // ─── Call duration timer ──────────────────────────────────────────────────────
+  const [callDuration, setCallDuration] = useState(0);   // seconds elapsed
+  const callStartRef   = useRef<number | null>(null);    // Date.now() when first connected
+
   const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remotePeerRef  = useRef<string | null>(null);
@@ -335,6 +339,29 @@ export function CallRoom() {
     return () => { cancelled = true; clearInterval(id); };
   }, [status, webrtc.getCallStats]);
 
+  // ─── Call duration timer ──────────────────────────────────────────────────────
+  // Starts counting from the moment the call first reaches "connected".
+  // Pauses during "reconnecting" (clock keeps running — we don't reset it).
+  // Resets when the call ends.
+  useEffect(() => {
+    if (status === "connected") {
+      // Record start time only on first connection (not on ICE recovery)
+      if (callStartRef.current === null) {
+        callStartRef.current = Date.now();
+        setCallDuration(0);
+      }
+      const id = setInterval(() => {
+        setCallDuration(Math.floor((Date.now() - callStartRef.current!) / 1000));
+      }, 1_000);
+      return () => clearInterval(id);
+    }
+    if (status === "disconnected" || status === "error") {
+      callStartRef.current = null;
+      setCallDuration(0);
+    }
+    return undefined;
+  }, [status]);
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
   const copyInvite = useCallback(async () => {
     await navigator.clipboard.writeText(inviteLink);
@@ -526,6 +553,13 @@ export function CallRoom() {
         <div className="absolute top-4 left-4 z-20 bg-black/40 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-orange-400"}`} />
           <span className="text-white text-sm font-medium">{peerName}</span>
+
+          {/* Duration — MM:SS, shown once the call is connected */}
+          {status === "connected" && callStartRef.current !== null && (
+            <span className="text-zinc-400 text-xs font-mono tabular-nums">
+              {String(Math.floor(callDuration / 60)).padStart(2, "0")}:{String(callDuration % 60).padStart(2, "0")}
+            </span>
+          )}
 
           {/* Signal bars — only shown when we have quality data */}
           {status === "connected" && callQuality !== null && (() => {
