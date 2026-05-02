@@ -366,6 +366,47 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     }
   }, [log]);
 
+  // ─── Call quality stats ──────────────────────────────────────────────────────
+  // Reads RTCPeerConnection.getStats() and extracts:
+  //   rtt         — round-trip time in milliseconds (from remote-inbound-rtp)
+  //   packetLoss  — inbound video packet loss percentage (0–100)
+  // Returns nulls when the PC doesn't exist or stats aren't ready yet.
+  const getCallStats = useCallback(async (): Promise<{
+    rtt: number | null;
+    packetLoss: number | null;
+  }> => {
+    const pc = pcRef.current;
+    if (!pc) return { rtt: null, packetLoss: null };
+
+    let rtt: number | null = null;
+    let packetLoss: number | null = null;
+
+    try {
+      const report = await pc.getStats();
+      report.forEach((s) => {
+        // RTT comes from the remote-inbound-rtp report (sender side)
+        if (s.type === "remote-inbound-rtp" && typeof s.roundTripTime === "number") {
+          const ms = Math.round(s.roundTripTime * 1000);
+          // Take the best (lowest) RTT across audio/video reports
+          if (rtt === null || ms < rtt) rtt = ms;
+        }
+        // Packet loss from inbound video stream
+        if (s.type === "inbound-rtp" && s.kind === "video") {
+          const lost     = (s.packetsLost     as number | undefined) ?? 0;
+          const received = (s.packetsReceived as number | undefined) ?? 0;
+          const total    = lost + received;
+          if (total > 0) {
+            packetLoss = Math.round((lost / total) * 1000) / 10; // one decimal, e.g. 1.4
+          }
+        }
+      });
+    } catch {
+      // getStats() can throw if the PC is closed — silently return nulls
+    }
+
+    return { rtt, packetLoss };
+  }, []);
+
   // Allow CallRoom to push fetched TURN credentials before buildPC is called
   const updateIceServers = useCallback((servers: RTCIceServer[]) => {
     iceServersRef.current = servers;
@@ -379,6 +420,7 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     localStreamRef,
     getLocalStream,
     updateIceServers,
+    getCallStats,
     makeOffer,
     makeIceRestartOffer,
     makeAnswer,

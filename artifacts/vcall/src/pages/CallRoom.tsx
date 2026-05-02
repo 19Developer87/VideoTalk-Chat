@@ -29,6 +29,11 @@ export function CallRoom() {
   const [copied,        setCopied       ] = useState(false);
   const [logs,          setLogs         ] = useState<LogEntry[]>([]);
 
+  // ─── Call quality indicator ──────────────────────────────────────────────────
+  type CallQuality = "excellent" | "good" | "fair" | "poor";
+  const [callQuality, setCallQuality] = useState<CallQuality | null>(null);
+  const [callStats,   setCallStats  ] = useState<{ rtt: number | null; packetLoss: number | null }>({ rtt: null, packetLoss: null });
+
   const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const remotePeerRef  = useRef<string | null>(null);
@@ -303,6 +308,33 @@ export function CallRoom() {
     }
   }, [webrtc.videoOff, webrtc.localStreamRef]);
 
+  // ─── Call quality polling ─────────────────────────────────────────────────────
+  // Polls getStats() every 2 s while connected to drive the signal-bar indicator.
+  // This is a CSS DOM overlay — it never appears in the PiP window because PiP
+  // only mirrors the raw <video> element, not any HTML drawn over it.
+  useEffect(() => {
+    if (status !== "connected") {
+      setCallQuality(null);
+      setCallStats({ rtt: null, packetLoss: null });
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      const stats = await webrtc.getCallStats();
+      if (cancelled) return;
+      setCallStats(stats);
+      const r = stats.rtt         ?? 999;
+      const p = stats.packetLoss  ?? 0;
+      if      (r < 100 && p < 1)  setCallQuality("excellent");
+      else if (r < 200 && p < 3)  setCallQuality("good");
+      else if (r < 400 && p < 8)  setCallQuality("fair");
+      else                         setCallQuality("poor");
+    };
+    poll();
+    const id = setInterval(poll, 2_000);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [status, webrtc.getCallStats]);
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
   const copyInvite = useCallback(async () => {
     await navigator.clipboard.writeText(inviteLink);
@@ -487,11 +519,35 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Peer name badge */}
+      {/* Peer name badge — includes signal-bar quality indicator.
+          This is a pure CSS overlay and is NOT visible in PiP mode because
+          PiP only mirrors the raw <video> element, not DOM overlaid on it. */}
       {(status === "connected" || status === "reconnecting") && peerName && (
         <div className="absolute top-4 left-4 z-20 bg-black/40 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-orange-400"}`} />
           <span className="text-white text-sm font-medium">{peerName}</span>
+
+          {/* Signal bars — only shown when we have quality data */}
+          {status === "connected" && callQuality !== null && (() => {
+            const barCount = { excellent: 4, good: 3, fair: 2, poor: 1 }[callQuality];
+            const barColor = { excellent: "bg-emerald-400", good: "bg-emerald-400", fair: "bg-yellow-400", poor: "bg-red-400" }[callQuality];
+            const tip = `${callQuality} · RTT ${callStats.rtt ?? "?"}ms · loss ${callStats.packetLoss ?? "?"}%`;
+            return (
+              <div
+                className="flex items-end gap-px ml-0.5"
+                title={tip}
+                aria-label={`Call quality: ${tip}`}
+              >
+                {([8, 11, 15, 19] as const).map((h, i) => (
+                  <div
+                    key={i}
+                    className={`w-1 rounded-sm transition-colors duration-500 ${i < barCount ? barColor : "bg-zinc-600"}`}
+                    style={{ height: h }}
+                  />
+                ))}
+              </div>
+            );
+          })()}
         </div>
       )}
 
