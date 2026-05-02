@@ -1,0 +1,61 @@
+Add user-selectable floating video position settings.
+
+Important limitation:
+Native browser/Android Picture-in-Picture window position is controlled by the operating system and usually cannot be set by web code.
+
+So implement two modes:
+
+1. Native PiP mode
+- Uses browser/system Picture-in-Picture.
+- Explain in UI that position is controlled by the device/OS.
+- Do not promise custom positioning for native PiP.
+
+2. In-app floating video mode
+- This is a custom mini video window inside the app.
+- This mode must support user-selected position.
+
+Add a setting called:
+Floating Video Position
+
+Options:
+- Top Left
+- Top Centre
+- Top Right
+- Middle Left
+- Middle Right
+- Bottom Left
+- Bottom Centre
+- Bottom Right
+
+Requirements:
+- Save selected position in localStorage.
+- Apply position to the in-app floating remote video window.
+- Work across Android, Windows PC, projectors, Android TV, and different screen sizes.
+- Use responsive CSS with safe areas:
+  env(safe-area-inset-top)
+  env(safe-area-inset-bottom)
+  env(safe-area-inset-left)
+  env(safe-area-inset-right)
+- Use 100dvh / 100dvw where suitable.
+- Clamp the floating window so it never goes off-screen.
+- Account for bottom control bar so bottom positions do not hide behind buttons.
+- On small screens, reduce floating window size automatically.
+- On large screens/projectors, allow a larger floating window.
+- Keep remote-control/keyboard focus safe.
+- Do not let floating video controls accidentally trigger hang up/mute.
+
+Suggested behaviour:
+- Native PiP button: enters system Picture-in-Picture if supported.
+- Floating Window button: toggles custom in-app floating video mode.
+- Settings lets user choose the floating window position.
+
+Important:
+- Do not change the working WebRTC, TURN, offer/answer, ICE, or room logic.
+- This is UI/layout only.
+- Keep normal full-screen call view working.
+- If native PiP is active, do not also show the custom floating window.
+- If custom floating window is active, do not enter native PiP automatically.
+
+Add clear labels:
+- “System PiP position is controlled by your device.”
+- “In-app floating video position can be customised here.”

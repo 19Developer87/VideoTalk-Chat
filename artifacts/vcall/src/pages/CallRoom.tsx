@@ -5,7 +5,8 @@ import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
 import { DebugLog, LogEntry } from "@/components/DebugLog";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
-  PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users, Terminal, Link,
+  PictureInPicture2, Minimize2, X, Link,
+  Wifi, WifiOff, Loader2, CheckCheck, Users, Terminal,
 } from "lucide-react";
 
 // "reconnecting" keeps the call screen open with a banner overlay.
@@ -39,13 +40,29 @@ export function CallRoom() {
     probed:       false,
   });
 
-  // ─── PiP state ───────────────────────────────────────────────────────────────
-  // Tracks whether the remote video is currently in a PiP window.
+  // ─── Native PiP state ────────────────────────────────────────────────────────
+  // Tracks whether the remote video is currently in a system PiP window.
   // When true, all in-app controls are locked (inert + keydown blocked) so that
   // remote-control / keyboard presses cannot accidentally mute, hang up, etc.
   // The WebRTC connection is NEVER touched on PiP enter/leave.
   const [isPiPActive, setIsPiPActive] = useState(false);
   const controlsBarRef = useRef<HTMLDivElement>(null);
+
+  // ─── In-app floating video window ────────────────────────────────────────────
+  // A custom mini <video> inside the app that mirrors the remote stream.
+  // Completely independent from native system PiP — position is user-selectable.
+  // Both modes are mutually exclusive: float window is hidden while native PiP
+  // is active, and float toggle is disabled while native PiP is active.
+  type FloatPosition =
+    | "top-left"    | "top-center"    | "top-right"
+    | "middle-left" | "middle-right"
+    | "bottom-left" | "bottom-center" | "bottom-right";
+
+  const [isFloatActive, setIsFloatActive] = useState(false);
+  const [floatPos, setFloatPos] = useState<FloatPosition>(() =>
+    (localStorage.getItem("floatVideoPos") as FloatPosition | null) ?? "bottom-left"
+  );
+  const floatVideoRef = useRef<HTMLVideoElement>(null);
 
   // ─── Call quality indicator ──────────────────────────────────────────────────
   type CallQuality = "excellent" | "good" | "fair" | "poor";
@@ -472,6 +489,21 @@ export function CallRoom() {
     }
   }, [isPiPActive]);
 
+  // ─── Float window stream sync ─────────────────────────────────────────────────
+  // Copies the remote srcObject to the floating <video> whenever float activates
+  // or the call reaches "connected". Does not create new tracks — just shares the
+  // existing MediaStream reference, which browsers handle efficiently.
+  useEffect(() => {
+    const floatEl  = floatVideoRef.current;
+    const remoteEl = remoteVideoRef.current;
+    if (!isFloatActive || !floatEl || !remoteEl) return;
+    const src = remoteEl.srcObject;
+    if (src instanceof MediaStream) {
+      floatEl.srcObject = src;
+      floatEl.play().catch(() => {/* autoplay policy — silently ignore */});
+    }
+  }, [isFloatActive, status]); // status re-triggers when stream arrives on "connected"
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
   const copyInvite = useCallback(async () => {
     await navigator.clipboard.writeText(inviteLink);
@@ -498,6 +530,34 @@ export function CallRoom() {
     }
     setShowSettings(false);
   }, [webrtc]);
+
+  // ─── Float position → CSS style ──────────────────────────────────────────────
+  // Maps each of the 8 positions to absolute CSS values.
+  // Bottom positions clear the controls bar (~90px).
+  // Center positions use left:50% + translateX / top:50% + translateY.
+  // Safe-area insets ensure the window never hides under system UI bars.
+  const floatPositionStyle = (pos: FloatPosition): React.CSSProperties => {
+    const safeTop    = "calc(env(safe-area-inset-top,    0px) + 16px)";
+    const safeBottom = "calc(env(safe-area-inset-bottom, 0px) + 90px)";
+    const safeLeft   = "calc(env(safe-area-inset-left,   0px) + 16px)";
+    const safeRight  = "calc(env(safe-area-inset-right,  0px) + 16px)";
+    switch (pos) {
+      case "top-left":     return { top: safeTop,    left: safeLeft };
+      case "top-center":   return { top: safeTop,    left: "50%", transform: "translateX(-50%)" };
+      case "top-right":    return { top: safeTop,    right: safeRight };
+      case "middle-left":  return { top: "50%",      left: safeLeft,  transform: "translateY(-50%)" };
+      case "middle-right": return { top: "50%",      right: safeRight, transform: "translateY(-50%)" };
+      case "bottom-left":  return { bottom: safeBottom, left: safeLeft };
+      case "bottom-center":return { bottom: safeBottom, left: "50%", transform: "translateX(-50%)" };
+      case "bottom-right": return { bottom: safeBottom, right: safeRight };
+    }
+  };
+
+  const FLOAT_GRID: { pos: FloatPosition | null; label: string }[][] = [
+    [{ pos: "top-left",    label: "↖" }, { pos: "top-center",    label: "↑" }, { pos: "top-right",    label: "↗" }],
+    [{ pos: "middle-left", label: "←" }, { pos: null,            label: "·" }, { pos: "middle-right", label: "→" }],
+    [{ pos: "bottom-left", label: "↙" }, { pos: "bottom-center", label: "↓" }, { pos: "bottom-right", label: "↘" }],
+  ];
 
   const statusColor: Record<ConnectionStatus, string> = {
     connecting:   "text-yellow-400",
@@ -751,6 +811,39 @@ export function CallRoom() {
         </div>
       )}
 
+      {/* ── In-app floating remote video window ──────────────────────────────────
+          Custom mini video that mirrors the remote stream at a user-chosen corner.
+          Independent of native system PiP — hidden while native PiP is active.
+          The floating <video> shares the same MediaStream object as the full-screen
+          background video; no extra WebRTC tracks or connections are created.    */}
+      {isFloatActive && status === "connected" && !isPiPActive && (
+        <div
+          className="absolute z-[25] w-32 h-24 sm:w-40 sm:h-28 lg:w-52 lg:h-36 rounded-2xl overflow-hidden border-2 border-violet-500/60 shadow-2xl bg-zinc-900"
+          style={floatPositionStyle(floatPos)}
+        >
+          <video
+            ref={floatVideoRef}
+            autoPlay
+            playsInline
+            className="w-full h-full object-cover"
+          />
+          {/* Close button */}
+          <button
+            onClick={() => setIsFloatActive(false)}
+            className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black/90 transition"
+            title="Close floating window"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
+          {/* Peer name label */}
+          {peerName && (
+            <div className="absolute bottom-1 left-0 right-0 text-center pointer-events-none">
+              <span className="text-white text-xs bg-black/50 px-1.5 py-0.5 rounded-full">{peerName}</span>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* Status badge (top-right) */}
       <div className={`absolute right-4 z-20 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]} ${status === "reconnecting" ? "top-12" : "top-4"}`}>
         <StatusIcon />
@@ -781,6 +874,41 @@ export function CallRoom() {
           ) : (
             <p className="text-zinc-500 text-sm">No camera available — video quality settings are disabled.</p>
           )}
+
+          {/* Floating video position */}
+          <div className="mt-4 pt-4 border-t border-zinc-800">
+            <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Floating Video Position</p>
+            <p className="text-zinc-600 text-xs mb-3 leading-relaxed">
+              In-app floating position can be customised here.
+              System PiP position is controlled by your device.
+            </p>
+            {/* 3×3 direction grid */}
+            <div className="grid grid-cols-3 gap-1">
+              {FLOAT_GRID.map((row, ri) =>
+                row.map(({ pos, label }, ci) =>
+                  pos ? (
+                    <button
+                      key={`${ri}-${ci}`}
+                      onClick={() => {
+                        setFloatPos(pos);
+                        localStorage.setItem("floatVideoPos", pos);
+                      }}
+                      className={`py-2 rounded-lg text-sm font-medium transition ${
+                        floatPos === pos
+                          ? "bg-violet-600 text-white"
+                          : "text-zinc-400 hover:bg-zinc-800"
+                      }`}
+                      title={pos.replace(/-/g, " ")}
+                    >
+                      {label}
+                    </button>
+                  ) : (
+                    <div key={`${ri}-${ci}`} className="py-2 text-center text-zinc-700 text-sm select-none">·</div>
+                  )
+                )
+              )}
+            </div>
+          </div>
         </div>
       )}
 
@@ -867,15 +995,38 @@ export function CallRoom() {
             {copied ? <CheckCheck className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
           </button>
 
+          {/* System PiP — position controlled by the OS/device */}
           {"pictureInPictureEnabled" in document && (
             <button
               onClick={() => remoteVideoRef.current && webrtc.enablePiP(remoteVideoRef.current)}
-              className="w-12 h-12 rounded-xl flex items-center justify-center bg-zinc-800 text-white hover:bg-zinc-700 transition"
-              title="Picture in Picture"
+              className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
+                isPiPActive ? "bg-violet-600 text-white" : "bg-zinc-800 text-white hover:bg-zinc-700"
+              }`}
+              title={isPiPActive ? "Exit system PiP" : "System Picture-in-Picture (position set by device)"}
             >
               <PictureInPicture2 className="w-5 h-5" />
             </button>
           )}
+
+          {/* In-app floating video — position is user-selectable in Settings */}
+          <button
+            onClick={() => setIsFloatActive(f => !f)}
+            disabled={isPiPActive}
+            className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
+              isFloatActive && !isPiPActive
+                ? "bg-violet-600 text-white"
+                : isPiPActive
+                  ? "bg-zinc-800/40 text-zinc-600 cursor-not-allowed"
+                  : "bg-zinc-800 text-white hover:bg-zinc-700"
+            }`}
+            title={
+              isPiPActive     ? "Exit system PiP first to use floating window" :
+              isFloatActive   ? "Close floating video window" :
+                                "Open floating video window (position in Settings)"
+            }
+          >
+            <Minimize2 className="w-5 h-5" />
+          </button>
 
           <button
             onClick={() => setShowDebug(s => !s)}
