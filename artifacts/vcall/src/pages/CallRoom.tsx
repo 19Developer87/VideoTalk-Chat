@@ -5,7 +5,7 @@ import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
 import { DebugLog, LogEntry } from "@/components/DebugLog";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
-  PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users, Terminal,
+  PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users, Terminal, Link,
 } from "lucide-react";
 
 // "reconnecting" keeps the call screen open with a banner overlay.
@@ -27,6 +27,7 @@ export function CallRoom() {
   const [showSettings,  setShowSettings ] = useState(false);
   const [showDebug,     setShowDebug    ] = useState(true);
   const [copied,        setCopied       ] = useState(false);
+  const [copiedCode,    setCopiedCode   ] = useState(false);
   const [logs,          setLogs         ] = useState<LogEntry[]>([]);
 
   // ─── Call quality indicator ──────────────────────────────────────────────────
@@ -246,6 +247,8 @@ export function CallRoom() {
   useEffect(() => {
     (async () => {
       addLog("info", `Frontend loaded — room:${roomId} name:${displayName}`);
+      // Persist room ID so the Lobby can pre-fill it next time (covers direct-URL access)
+      if (roomId) localStorage.setItem("lastRoomId", roomId);
 
       // Fetch ICE servers (includes TURN credentials if configured on the server).
       // Must happen before joinRoom so buildPC uses the right servers.
@@ -369,6 +372,12 @@ export function CallRoom() {
     setTimeout(() => setCopied(false), 2000);
   }, [inviteLink]);
 
+  const copyRoomCode = useCallback(async () => {
+    await navigator.clipboard.writeText(roomId ?? "");
+    setCopiedCode(true);
+    setTimeout(() => setCopiedCode(false), 2000);
+  }, [roomId]);
+
   const handleHangUp = useCallback(() => {
     webrtc.hangUp();
     signaling.leaveRoom();
@@ -449,24 +458,39 @@ export function CallRoom() {
             {/* Sub-text */}
             <p className="text-zinc-400 text-sm mb-5">{statusMessage}</p>
 
-            {/* Waiting — invite link */}
+            {/* Waiting — large room code + share buttons */}
             {status === "waiting" && (
-              <div className="space-y-3 text-left">
-                <p className="text-zinc-400 text-sm text-center">Send this link to the other person:</p>
-                <div className="flex items-center gap-2 bg-zinc-800 rounded-xl px-3 py-3 border border-zinc-700">
-                  <span className="text-zinc-200 text-xs font-mono flex-1 overflow-x-auto whitespace-nowrap pr-1">
-                    {inviteLink}
-                  </span>
+              <div className="space-y-3">
+                {/* Big room code — easy to read out loud or type on a TV remote */}
+                <div className="bg-zinc-800/80 border border-zinc-700 rounded-2xl px-6 py-5 text-center">
+                  <p className="text-zinc-500 text-xs uppercase tracking-widest mb-2">Room Code</p>
+                  <p className="text-white text-5xl font-bold font-mono tracking-[0.2em]">{roomId}</p>
+                </div>
+
+                {/* Copy buttons */}
+                <div className="flex gap-2">
+                  <button
+                    onClick={copyRoomCode}
+                    className="flex-1 flex items-center justify-center gap-1.5 text-sm font-medium py-2.5 rounded-xl bg-zinc-800 hover:bg-zinc-700 text-white transition border border-zinc-700"
+                  >
+                    {copiedCode
+                      ? <><CheckCheck className="w-4 h-4 text-emerald-400" /> Copied!</>
+                      : <><Copy className="w-4 h-4" /> Copy code</>}
+                  </button>
                   <button
                     onClick={copyInvite}
-                    className="shrink-0 flex items-center gap-1.5 text-xs font-medium px-2.5 py-1.5 rounded-lg bg-violet-600 hover:bg-violet-500 text-white transition"
+                    className="flex-1 flex items-center justify-center gap-1.5 text-sm font-medium py-2.5 rounded-xl bg-violet-600 hover:bg-violet-500 text-white transition"
                   >
                     {copied
-                      ? <><CheckCheck className="w-3.5 h-3.5" /> Copied</>
-                      : <><Copy className="w-3.5 h-3.5" /> Copy</>}
+                      ? <><CheckCheck className="w-4 h-4" /> Copied!</>
+                      : <><Link className="w-4 h-4" /> Copy link</>}
                   </button>
                 </div>
-                <p className="text-center text-zinc-600 text-xs font-mono">Room ID: {roomId}</p>
+
+                {/* Invite URL — small, for reference */}
+                <p className="text-center text-zinc-600 text-xs font-mono truncate px-1" title={inviteLink}>
+                  {inviteLink}
+                </p>
               </div>
             )}
 

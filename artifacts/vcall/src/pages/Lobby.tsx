@@ -1,26 +1,41 @@
 import { useState, useEffect } from "react";
 import { useLocation } from "wouter";
-import { Video, Phone, Link, ArrowRight, Users } from "lucide-react";
+import { Video, Phone, Link, ArrowRight, Users, X } from "lucide-react";
 
+// Newly created rooms use a 4-digit number — easy to type on any device,
+// including Android TV remote controls. Old alphanumeric IDs still work when
+// opened from an invite link (they are never overwritten by this generator).
 function generateRoomId(): string {
-  return Math.random().toString(36).substring(2, 8).toUpperCase();
+  return String(Math.floor(1000 + Math.random() * 9000));
 }
+
+const LS_ROOM = "lastRoomId";
+const LS_NAME = "displayName";
 
 export function Lobby() {
   const [, navigate] = useLocation();
-  const [displayName, setDisplayName] = useState(() => localStorage.getItem("displayName") || "");
-  const [roomId, setRoomId] = useState("");
-  const [mode, setMode] = useState<"create" | "join">("create");
-  const [error, setError] = useState("");
+
+  const [displayName, setDisplayName] = useState(() => localStorage.getItem(LS_NAME) || "");
+  // Pre-fill with last room used; invite-link param overrides this in useEffect
+  const [roomId,      setRoomId     ] = useState(() => localStorage.getItem(LS_ROOM) || "");
+  const [mode,        setMode       ] = useState<"create" | "join">("create");
+  const [error,       setError      ] = useState("");
 
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
+    const params      = new URLSearchParams(window.location.search);
     const roomFromUrl = params.get("room");
     if (roomFromUrl) {
-      setRoomId(roomFromUrl.toUpperCase());
+      // Invite-link room ID always wins — preserve case so old alphanumeric IDs work
+      setRoomId(roomFromUrl);
       setMode("join");
     }
+    // No URL param: useState initializer already loaded lastRoomId from localStorage
   }, []);
+
+  const clearSavedRoom = () => {
+    localStorage.removeItem(LS_ROOM);
+    setRoomId("");
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -31,18 +46,26 @@ export function Lobby() {
       return;
     }
 
-    const finalRoomId = mode === "create" ? generateRoomId() : roomId.trim().toUpperCase();
+    // Create: generate new simple numeric ID.
+    // Join: use what the user typed, uppercase for backward compat with old IDs.
+    const finalRoomId = mode === "create"
+      ? generateRoomId()
+      : roomId.trim().toUpperCase();
 
     if (!finalRoomId) {
-      setError("Please enter a room ID");
+      setError("Please enter a room code");
       return;
     }
 
-    localStorage.setItem("displayName", displayName.trim());
+    localStorage.setItem(LS_NAME, displayName.trim());
     localStorage.setItem("myDisplayName", displayName.trim());
+    localStorage.setItem(LS_ROOM, finalRoomId);
 
     navigate(`/room/${finalRoomId}`);
   };
+
+  const savedRoom  = localStorage.getItem(LS_ROOM);
+  const hasSaved   = Boolean(savedRoom && savedRoom === roomId && roomId.length > 0);
 
   return (
     <div className="min-h-screen bg-zinc-950 flex flex-col items-center justify-center p-4">
@@ -100,16 +123,35 @@ export function Lobby() {
 
             {mode === "join" && (
               <div>
-                <label className="block text-xs font-medium text-zinc-400 mb-1.5 uppercase tracking-wider">
-                  Room ID
-                </label>
+                <div className="flex items-center justify-between mb-1.5">
+                  <label className="block text-xs font-medium text-zinc-400 uppercase tracking-wider">
+                    Room Code
+                  </label>
+                  {hasSaved && (
+                    <button
+                      type="button"
+                      onClick={clearSavedRoom}
+                      className="flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition"
+                    >
+                      <X className="w-3 h-3" />
+                      Clear saved
+                    </button>
+                  )}
+                </div>
                 <input
                   type="text"
                   value={roomId}
-                  onChange={e => setRoomId(e.target.value.toUpperCase())}
-                  placeholder="e.g. ABC123"
-                  className="w-full bg-zinc-800 border border-zinc-700 text-white rounded-xl px-4 py-3 text-sm placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition font-mono"
+                  onChange={e => setRoomId(e.target.value)}
+                  placeholder="e.g. 4827"
+                  className="w-full bg-zinc-800 border border-zinc-700 text-white rounded-xl px-4 py-3 text-sm placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500 focus:border-transparent transition font-mono tracking-widest text-center text-lg"
+                  inputMode="text"
+                  autoComplete="off"
                 />
+                {hasSaved && (
+                  <p className="text-zinc-600 text-xs mt-1.5 text-center">
+                    Last room auto-filled
+                  </p>
+                )}
               </div>
             )}
 
@@ -131,7 +173,7 @@ export function Lobby() {
 
         <div className="mt-6 flex items-center justify-center gap-2 text-zinc-500 text-xs">
           <Link className="w-3.5 h-3.5" />
-          <span>Share your room link to invite others</span>
+          <span>Share your room code or link to invite others</span>
         </div>
       </div>
     </div>
