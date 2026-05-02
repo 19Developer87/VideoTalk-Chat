@@ -5,142 +5,183 @@ import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
 import { DebugLog, LogEntry } from "@/components/DebugLog";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
-  PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users,
-  Terminal
+  PictureInPicture2, Wifi, WifiOff, Loader2, CheckCheck, Users, Terminal,
 } from "lucide-react";
 
 type ConnectionStatus = "connecting" | "waiting" | "connected" | "disconnected" | "error" | "full";
 
-function timestamp(): string {
+function ts(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false });
 }
 
 export function CallRoom() {
-  const { roomId } = useParams<{ roomId: string }>();
-  const [, navigate] = useLocation();
-  const [displayName] = useState(() => localStorage.getItem("displayName") || "Guest");
-  const [peerName, setPeerName] = useState("");
-  const [status, setStatus] = useState<ConnectionStatus>("connecting");
-  const [statusMessage, setStatusMessage] = useState("Connecting to server…");
-  const [showSettings, setShowSettings] = useState(false);
-  const [showDebug, setShowDebug] = useState(true);
-  const [copied, setCopied] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
+  const { roomId }     = useParams<{ roomId: string }>();
+  const [, navigate]   = useLocation();
+  const [displayName]  = useState(() => localStorage.getItem("displayName") || "Guest");
 
-  const localVideoRef = useRef<HTMLVideoElement>(null);
+  const [peerName,      setPeerName     ] = useState("");
+  const [status,        setStatus       ] = useState<ConnectionStatus>("connecting");
+  const [statusMessage, setStatusMessage] = useState("Connecting to server…");
+  const [showSettings,  setShowSettings ] = useState(false);
+  const [showDebug,     setShowDebug    ] = useState(true);
+  const [copied,        setCopied       ] = useState(false);
+  const [logs,          setLogs         ] = useState<LogEntry[]>([]);
+
+  const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const remotePeerIdRef = useRef<string | null>(null);
+  const remotePeerRef  = useRef<string | null>(null);  // socketId of the other peer
 
   const inviteLink = `${window.location.origin}/?room=${roomId}`;
 
   const addLog = useCallback((level: LogEntry["level"], msg: string) => {
-    setLogs(prev => [...prev, { time: timestamp(), level, msg }]);
+    setLogs(prev => [...prev, { time: ts(), level, msg }]);
   }, []);
 
+  // ─── WebRTC hook ────────────────────────────────────────────────────────────
   const webrtc = useWebRTC({
-    onOffer: () => {},
-    onAnswer: () => {},
-    onIceCandidate: () => {},
+    onLog: addLog,
+
     onRemoteStream: (stream) => {
-      if (remoteVideoRef.current) {
-        remoteVideoRef.current.srcObject = stream;
+      addLog("success", "Remote stream received — attaching to video element");
+      const el = remoteVideoRef.current;
+      if (el) {
+        el.srcObject = stream;
+        el.play().catch(err =>
+          addLog("warn", `Remote video play() blocked: ${err.message}`)
+        );
       }
       setStatus("connected");
       setStatusMessage("Connected");
     },
+
     onConnectionStateChange: (state) => {
       if (state === "disconnected" || state === "failed" || state === "closed") {
         setStatus("disconnected");
         setStatusMessage("Peer disconnected");
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       } else if (state === "connecting") {
-        setStatusMessage("Establishing connection…");
+        setStatusMessage("Establishing P2P connection…");
       } else if (state === "connected") {
         setStatus("connected");
         setStatusMessage("Connected");
       }
     },
-    onLog: addLog,
+
+    // Forward ICE candidates to the remote peer via signaling
+    onIceCandidateGathered: (candidate) => {
+      if (remotePeerRef.current) {
+        signaling.sendIceCandidate(remotePeerRef.current, candidate);
+      }
+    },
   });
 
+  // ─── Signaling hook ─────────────────────────────────────────────────────────
   const signaling = useSignaling({
-    onJoinedRoom: async ({ peers, isInitiator }) => {
+    onLog: addLog,
+
+    // Both users receive this after join-room
+    onJoinedRoom: ({ peers, isInitiator }) => {
       if (isInitiator) {
+        // HOST — wait; will send offer when peer-joined fires
         setStatus("waiting");
         setStatusMessage("Waiting for someone to join…");
       } else {
-        setStatus("connecting");
-        setStatusMessage("Joining room…");
+        // JOINER — host is already in peers list; wait for host to send offer
         if (peers.length > 0) {
-          const peer = peers[0];
-          remotePeerIdRef.current = peer.socketId;
-          setPeerName(peer.displayName);
-          const offer = await new Promise<RTCSessionDescriptionInit>((resolve) => {
-            webrtc.createOffer(resolve);
-          });
-          signaling.sendOffer(peer.socketId, offer);
-          setStatusMessage("Sending connection offer…");
+          remotePeerRef.current = peers[0].socketId;
+          setPeerName(peers[0].displayName);
+          setStatus("connecting");
+          setStatusMessage("Joining room — waiting for host offer…");
         }
       }
     },
-    onPeerJoined: ({ socketId, displayName: name }) => {
-      remotePeerIdRef.current = socketId;
+
+    // HOST receives this when joiner arrives → host makes offer
+    onPeerJoined: async ({ socketId, displayName: name }) => {
+      remotePeerRef.current = socketId;
       setPeerName(name);
       setStatus("connecting");
-      setStatusMessage(`${name} joined — establishing connection…`);
+      setStatusMessage(`${name} joined — creating offer…`);
+      try {
+        const offer = await webrtc.makeOffer();
+        signaling.sendOffer(socketId, offer);
+        setStatusMessage("Offer sent — waiting for answer…");
+      } catch (err) {
+        addLog("error", `makeOffer failed: ${(err as Error).message}`);
+        setStatus("error");
+        setStatusMessage("Failed to create connection offer");
+      }
     },
+
+    // JOINER receives offer from host → make answer
+    onOffer: async ({ from, offer }) => {
+      remotePeerRef.current = from;
+      addLog("info", `Offer received from ${from} — creating answer…`);
+      setStatusMessage("Offer received — creating answer…");
+      try {
+        const answer = await webrtc.makeAnswer(offer);
+        signaling.sendAnswer(from, answer);
+        setStatusMessage("Answer sent — connecting…");
+      } catch (err) {
+        addLog("error", `makeAnswer failed: ${(err as Error).message}`);
+        setStatus("error");
+        setStatusMessage("Failed to create answer");
+      }
+    },
+
+    // HOST receives answer from joiner
+    onAnswer: async ({ answer }) => {
+      addLog("info", "Answer received — finalising connection…");
+      try {
+        await webrtc.receiveAnswer(answer);
+      } catch (err) {
+        addLog("error", `receiveAnswer failed: ${(err as Error).message}`);
+      }
+    },
+
+    // Both: add incoming ICE candidate (buffered until remote desc is set)
+    onIceCandidate: async ({ candidate }) => {
+      await webrtc.addIceCandidate(candidate);
+    },
+
     onPeerLeft: () => {
       setStatus("disconnected");
       setStatusMessage("Peer left the call");
       setPeerName("");
-      remotePeerIdRef.current = null;
+      remotePeerRef.current = null;
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
     },
-    onOffer: async ({ from, offer }) => {
-      remotePeerIdRef.current = from;
-      const answer = await webrtc.handleOffer(offer);
-      signaling.sendAnswer(from, answer);
-      setStatusMessage("Sending answer…");
-    },
-    onAnswer: async ({ answer }) => {
-      await webrtc.handleAnswer(answer);
-    },
-    onIceCandidate: async ({ candidate }) => {
-      await webrtc.addIceCandidate(candidate);
-    },
+
     onRoomFull: () => {
       setStatus("full");
       setStatusMessage("Room is full (max 2 people)");
     },
-    onLog: addLog,
   });
 
+  // ─── Init: get media then join room ─────────────────────────────────────────
   useEffect(() => {
-    const init = async () => {
+    (async () => {
+      addLog("info", `Frontend loaded — room:${roomId} name:${displayName}`);
       try {
         const stream = await webrtc.getLocalStream("medium");
         if (localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
+          addLog("success", "Local preview attached to video element");
         }
         signaling.joinRoom(roomId!, displayName);
       } catch (err: unknown) {
-        const error = err as { name?: string; message?: string };
-        if (error.name === "NotAllowedError" || error.name === "PermissionDeniedError") {
-          setStatus("error");
-          setStatusMessage("Camera/microphone permission denied. Please allow access and reload.");
-          addLog("error", `Permission denied: ${error.message}`);
-        } else if (error.name === "NotFoundError") {
-          setStatus("error");
-          setStatusMessage("No camera or microphone found on this device.");
-          addLog("error", `Device not found: ${error.message}`);
-        } else {
-          setStatus("error");
-          setStatusMessage("Could not access camera/microphone.");
-          addLog("error", `Media error: ${error.message}`);
-        }
+        const e = err as { name?: string; message?: string };
+        const isPerms = e.name === "NotAllowedError" || e.name === "PermissionDeniedError";
+        const isNotFound = e.name === "NotFoundError";
+        setStatus("error");
+        setStatusMessage(
+          isPerms    ? "Camera/microphone permission denied — allow access and reload." :
+          isNotFound ? "No camera or microphone found on this device." :
+                       "Could not access camera/microphone."
+        );
+        addLog("error", `Media error [${e.name}]: ${e.message}`);
       }
-    };
-    init();
+    })();
 
     return () => {
       webrtc.hangUp();
@@ -149,6 +190,7 @@ export function CallRoom() {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // ─── Helpers ─────────────────────────────────────────────────────────────────
   const copyInvite = useCallback(async () => {
     await navigator.clipboard.writeText(inviteLink);
     setCopied(true);
@@ -161,12 +203,6 @@ export function CallRoom() {
     navigate("/");
   }, [webrtc, signaling, navigate]);
 
-  const handlePiP = useCallback(() => {
-    if (remoteVideoRef.current) {
-      webrtc.enablePictureInPicture(remoteVideoRef.current);
-    }
-  }, [webrtc]);
-
   const handleQualityChange = useCallback(async (q: VideoQuality) => {
     await webrtc.changeQuality(q);
     if (localVideoRef.current && webrtc.localStreamRef.current) {
@@ -176,23 +212,23 @@ export function CallRoom() {
   }, [webrtc]);
 
   const statusColor: Record<ConnectionStatus, string> = {
-    connecting: "text-yellow-400",
-    waiting: "text-blue-400",
-    connected: "text-emerald-400",
-    disconnected: "text-orange-400",
-    error: "text-red-400",
-    full: "text-red-400",
+    connecting: "text-yellow-400", waiting: "text-blue-400", connected: "text-emerald-400",
+    disconnected: "text-orange-400", error: "text-red-400", full: "text-red-400",
   };
 
   const StatusIcon = () => {
     if (status === "connecting") return <Loader2 className="w-3.5 h-3.5 animate-spin" />;
-    if (status === "connected") return <Wifi className="w-3.5 h-3.5" />;
-    if (status === "waiting") return <Users className="w-3.5 h-3.5" />;
+    if (status === "connected")  return <Wifi    className="w-3.5 h-3.5" />;
+    if (status === "waiting")    return <Users   className="w-3.5 h-3.5" />;
     return <WifiOff className="w-3.5 h-3.5" />;
   };
 
+  const { debugInfo } = webrtc;
+
+  // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-screen h-screen bg-zinc-950 overflow-hidden">
+
       {/* Remote video — full screen */}
       <video
         ref={remoteVideoRef}
@@ -203,9 +239,9 @@ export function CallRoom() {
 
       {/* Waiting / Error overlay */}
       {status !== "connected" && (
-        <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950">
+        <div className="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950 z-10">
           <div className="text-center max-w-sm px-6">
-            {status === "error" || status === "full" ? (
+            {(status === "error" || status === "full") ? (
               <div className="w-16 h-16 rounded-full bg-red-500/20 flex items-center justify-center mx-auto mb-4">
                 <WifiOff className="w-8 h-8 text-red-400" />
               </div>
@@ -227,19 +263,16 @@ export function CallRoom() {
               <div className="mt-4 space-y-3">
                 <p className="text-zinc-400 text-sm">Share this link to invite someone:</p>
                 <div className="flex items-center gap-2 bg-zinc-800 rounded-xl px-3 py-2.5 border border-zinc-700">
-                  <span className="text-zinc-300 text-xs font-mono flex-1 overflow-x-auto whitespace-nowrap scrollbar-thin scrollbar-thumb-zinc-600 scrollbar-track-transparent">{inviteLink}</span>
-                  <button
-                    onClick={copyInvite}
-                    className="shrink-0 text-violet-400 hover:text-violet-300 transition"
-                  >
+                  <span className="text-zinc-300 text-xs font-mono flex-1 overflow-x-auto whitespace-nowrap">
+                    {inviteLink}
+                  </span>
+                  <button onClick={copyInvite} className="shrink-0 text-violet-400 hover:text-violet-300 transition">
                     {copied ? <CheckCheck className="w-4 h-4 text-emerald-400" /> : <Copy className="w-4 h-4" />}
                   </button>
                 </div>
-                <div className="flex items-center justify-center gap-2 mt-2">
-                  <span className="text-zinc-600 text-xs font-mono bg-zinc-800 px-3 py-1 rounded-lg border border-zinc-700">
-                    Room: {roomId}
-                  </span>
-                </div>
+                <span className="inline-block text-zinc-600 text-xs font-mono bg-zinc-800 px-3 py-1 rounded-lg border border-zinc-700">
+                  Room: {roomId}
+                </span>
               </div>
             )}
 
@@ -257,20 +290,42 @@ export function CallRoom() {
 
       {/* Debug log panel */}
       {showDebug && (
-        <DebugLog entries={logs} onClose={() => setShowDebug(false)} />
+        <div className="absolute top-4 left-4 z-50 w-full max-w-sm pointer-events-none">
+          <div className="pointer-events-auto">
+            <DebugLog entries={logs} onClose={() => setShowDebug(false)} />
+            {/* Connection status panel */}
+            <div className="mt-2 bg-black/80 backdrop-blur-sm border border-zinc-700 rounded-xl px-3 py-2 font-mono text-xs space-y-0.5">
+              <div className="flex gap-3 flex-wrap">
+                <span className={debugInfo.localVideo  ? "text-emerald-400" : "text-red-400"}>
+                  cam:{debugInfo.localVideo  ? "on" : "off"}
+                </span>
+                <span className={debugInfo.localAudio  ? "text-emerald-400" : "text-red-400"}>
+                  mic:{debugInfo.localAudio  ? "on" : "off"}
+                </span>
+                <span className={debugInfo.remoteStream ? "text-emerald-400" : "text-zinc-500"}>
+                  remote:{debugInfo.remoteStream ? "✓" : "—"}
+                </span>
+                <span className={debugInfo.connState === "connected" ? "text-emerald-400" : "text-yellow-400"}>
+                  pc:{debugInfo.connState}
+                </span>
+                <span className="text-zinc-400">ice:{debugInfo.iceConnState}</span>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
 
-      {/* Peer name */}
+      {/* Peer name badge */}
       {status === "connected" && peerName && (
-        <div className="absolute top-4 left-4 bg-black/40 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
+        <div className="absolute top-4 left-4 z-20 bg-black/40 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
           <div className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
           <span className="text-white text-sm font-medium">{peerName}</span>
         </div>
       )}
 
-      {/* Local video — hidden entirely when camera is off */}
+      {/* Local video preview */}
       {!webrtc.videoOff && (
-        <div className="absolute bottom-28 right-4 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
+        <div className="absolute bottom-28 right-4 z-20 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
           <video
             ref={localVideoRef}
             autoPlay
@@ -284,15 +339,15 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Status indicator */}
-      <div className={`absolute top-4 right-4 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]}`}>
+      {/* Status badge */}
+      <div className={`absolute top-4 right-4 z-20 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]}`}>
         <StatusIcon />
         <span>{statusMessage}</span>
       </div>
 
       {/* Settings panel */}
       {showSettings && (
-        <div className="absolute bottom-28 left-4 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52 z-40">
+        <div className="absolute bottom-28 left-4 z-40 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52">
           <h3 className="text-white text-sm font-semibold mb-3">Settings</h3>
           <p className="text-zinc-400 text-xs uppercase tracking-wider mb-2">Video Quality</p>
           <div className="space-y-1.5">
@@ -301,9 +356,7 @@ export function CallRoom() {
                 key={q}
                 onClick={() => handleQualityChange(q)}
                 className={`w-full text-left px-3 py-2 rounded-lg text-sm transition ${
-                  webrtc.quality === q
-                    ? "bg-violet-600 text-white"
-                    : "text-zinc-300 hover:bg-zinc-800"
+                  webrtc.quality === q ? "bg-violet-600 text-white" : "text-zinc-300 hover:bg-zinc-800"
                 }`}
               >
                 {q === "low" ? "Low (480p)" : q === "medium" ? "Medium (720p)" : "High (1080p)"}
@@ -314,35 +367,29 @@ export function CallRoom() {
       )}
 
       {/* Controls bar */}
-      <div className="absolute bottom-6 left-0 right-0 flex items-center justify-center gap-3 px-4">
+      <div className="absolute bottom-6 left-0 right-0 z-20 flex items-center justify-center px-4">
         <div className="flex items-center gap-3 bg-zinc-900/90 backdrop-blur-md border border-zinc-700 rounded-2xl px-4 py-3 shadow-2xl">
-          {/* Mute */}
+
           <button
             onClick={webrtc.toggleAudio}
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
-              webrtc.audioMuted
-                ? "bg-red-500/20 text-red-400 border border-red-500/40"
-                : "bg-zinc-800 text-white hover:bg-zinc-700"
+              webrtc.audioMuted ? "bg-red-500/20 text-red-400 border border-red-500/40" : "bg-zinc-800 text-white hover:bg-zinc-700"
             }`}
             title={webrtc.audioMuted ? "Unmute" : "Mute"}
           >
             {webrtc.audioMuted ? <MicOff className="w-5 h-5" /> : <Mic className="w-5 h-5" />}
           </button>
 
-          {/* Camera */}
           <button
             onClick={webrtc.toggleVideo}
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
-              webrtc.videoOff
-                ? "bg-red-500/20 text-red-400 border border-red-500/40"
-                : "bg-zinc-800 text-white hover:bg-zinc-700"
+              webrtc.videoOff ? "bg-red-500/20 text-red-400 border border-red-500/40" : "bg-zinc-800 text-white hover:bg-zinc-700"
             }`}
             title={webrtc.videoOff ? "Turn camera on" : "Turn camera off"}
           >
             {webrtc.videoOff ? <VideoOff className="w-5 h-5" /> : <Video className="w-5 h-5" />}
           </button>
 
-          {/* Hang up */}
           <button
             onClick={handleHangUp}
             className="w-14 h-12 rounded-xl flex items-center justify-center bg-red-600 hover:bg-red-500 active:bg-red-700 text-white transition"
@@ -351,7 +398,6 @@ export function CallRoom() {
             <PhoneOff className="w-5 h-5" />
           </button>
 
-          {/* Copy invite */}
           <button
             onClick={copyInvite}
             className="w-12 h-12 rounded-xl flex items-center justify-center bg-zinc-800 text-white hover:bg-zinc-700 transition"
@@ -360,10 +406,9 @@ export function CallRoom() {
             {copied ? <CheckCheck className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
           </button>
 
-          {/* PiP */}
           {"pictureInPictureEnabled" in document && (
             <button
-              onClick={handlePiP}
+              onClick={() => remoteVideoRef.current && webrtc.enablePiP(remoteVideoRef.current)}
               className="w-12 h-12 rounded-xl flex items-center justify-center bg-zinc-800 text-white hover:bg-zinc-700 transition"
               title="Picture in Picture"
             >
@@ -371,7 +416,6 @@ export function CallRoom() {
             </button>
           )}
 
-          {/* Debug toggle */}
           <button
             onClick={() => setShowDebug(s => !s)}
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
@@ -382,7 +426,6 @@ export function CallRoom() {
             <Terminal className="w-5 h-5" />
           </button>
 
-          {/* Settings */}
           <button
             onClick={() => setShowSettings(s => !s)}
             className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
@@ -392,6 +435,7 @@ export function CallRoom() {
           >
             <Settings className="w-5 h-5" />
           </button>
+
         </div>
       </div>
     </div>

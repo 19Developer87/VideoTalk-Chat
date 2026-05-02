@@ -1,232 +1,254 @@
 import { useRef, useCallback, useState } from "react";
 
 export type VideoQuality = "low" | "medium" | "high";
+export type LogFn = (level: "info" | "success" | "warn" | "error", msg: string) => void;
 
 const QUALITY_CONSTRAINTS: Record<VideoQuality, MediaTrackConstraints> = {
-  low: { width: { ideal: 640 }, height: { ideal: 480 }, frameRate: { ideal: 15 } },
-  medium: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 } },
-  high: { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
+  low:    { width: { ideal: 640  }, height: { ideal: 480  }, frameRate: { ideal: 15 } },
+  medium: { width: { ideal: 1280 }, height: { ideal: 720  }, frameRate: { ideal: 30 } },
+  high:   { width: { ideal: 1920 }, height: { ideal: 1080 }, frameRate: { ideal: 30 } },
 };
 
-const ICE_SERVERS = [
-  { urls: "stun:stun.l.google.com:19302" },
+const ICE_SERVERS: RTCIceServer[] = [
+  { urls: "stun:stun.l.google.com:19302"  },
   { urls: "stun:stun1.l.google.com:19302" },
   { urls: "stun:stun2.l.google.com:19302" },
 ];
 
-export interface WebRTCHandlers {
-  onOffer: (offer: RTCSessionDescriptionInit) => void;
-  onAnswer: (answer: RTCSessionDescriptionInit) => void;
-  onIceCandidate: (candidate: RTCIceCandidateInit) => void;
-  onRemoteStream: (stream: MediaStream) => void;
+export interface WebRTCCallbacks {
+  onRemoteStream:          (stream: MediaStream) => void;
   onConnectionStateChange: (state: RTCPeerConnectionState) => void;
-  onLog?: (level: "info" | "success" | "warn" | "error", msg: string) => void;
+  onIceCandidateGathered:  (candidate: RTCIceCandidateInit) => void;
+  onLog:                   LogFn;
 }
 
-export function useWebRTC(handlers: WebRTCHandlers) {
-  const pcRef = useRef<RTCPeerConnection | null>(null);
-  const localStreamRef = useRef<MediaStream | null>(null);
+export interface DebugInfo {
+  localVideo:    boolean;
+  localAudio:    boolean;
+  remoteStream:  boolean;
+  connState:     string;
+  iceConnState:  string;
+}
+
+export function useWebRTC(callbacks: WebRTCCallbacks) {
+  const pcRef              = useRef<RTCPeerConnection | null>(null);
+  const localStreamRef     = useRef<MediaStream | null>(null);
+  const iceCandidateBuf    = useRef<RTCIceCandidateInit[]>([]);
+  const remoteDescSet      = useRef(false);
+  const callbacksRef       = useRef(callbacks);
+  callbacksRef.current     = callbacks;
+
   const [audioMuted, setAudioMuted] = useState(false);
-  const [videoOff, setVideoOff] = useState(false);
-  const [quality, setQuality] = useState<VideoQuality>("medium");
-  const handlersRef = useRef(handlers);
-  handlersRef.current = handlers;
+  const [videoOff,   setVideoOff  ] = useState(false);
+  const [quality,    setQuality   ] = useState<VideoQuality>("medium");
+  const [debugInfo,  setDebugInfo ] = useState<DebugInfo>({
+    localVideo: false, localAudio: false,
+    remoteStream: false, connState: "—", iceConnState: "—",
+  });
 
-  const log = (level: "info" | "success" | "warn" | "error", msg: string) => {
-    handlersRef.current.onLog?.(level, msg);
-  };
-
-  const getLocalStream = useCallback(async (videoQuality: VideoQuality = "medium"): Promise<MediaStream> => {
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(t => t.stop());
-    }
-    log("info", `Requesting camera/mic — quality: ${videoQuality}`);
-    const stream = await navigator.mediaDevices.getUserMedia({
-      video: QUALITY_CONSTRAINTS[videoQuality],
-      audio: true,
-    });
-    log("success", `Local stream acquired — tracks: ${stream.getTracks().map(t => t.kind).join(", ")}`);
-    localStreamRef.current = stream;
-    return stream;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const log = useCallback((level: LogFn extends (...a: infer P) => void ? P[0] : never, msg: string) => {
+    callbacksRef.current.onLog(level, msg);
   }, []);
 
-  const createPeerConnection = useCallback((onOffer?: (offer: RTCSessionDescriptionInit) => void) => {
-    if (pcRef.current) {
-      pcRef.current.close();
+  // ─── Drain the ICE buffer once remote description is ready ──────────────────
+  const drainIceBuf = useCallback(async (pc: RTCPeerConnection) => {
+    const buf = iceCandidateBuf.current.splice(0);
+    for (const c of buf) {
+      try {
+        await pc.addIceCandidate(new RTCIceCandidate(c));
+        log("info", `ICE (buffered) added — ${buf.length} queued candidate(s) drained`);
+      } catch (err) {
+        log("error", `ICE drain error: ${(err as Error).message}`);
+      }
     }
+  }, [log]);
 
-    log("info", "Creating RTCPeerConnection with Google STUN servers");
+  // ─── Build a fresh RTCPeerConnection ────────────────────────────────────────
+  const buildPC = useCallback((): RTCPeerConnection => {
+    pcRef.current?.close();
+    remoteDescSet.current  = false;
+    iceCandidateBuf.current = [];
+
+    log("info", "RTCPeerConnection created (STUN: Google)");
     const pc = new RTCPeerConnection({ iceServers: ICE_SERVERS });
     pcRef.current = pc;
 
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        log("info", `ICE candidate gathered — type: ${event.candidate.type ?? "host"}, protocol: ${event.candidate.protocol}`);
-        handlersRef.current.onIceCandidate(event.candidate.toJSON());
+    pc.onicecandidate = (ev) => {
+      if (ev.candidate) {
+        log("info", `ICE gathered — type:${ev.candidate.type ?? "host"} proto:${ev.candidate.protocol}`);
+        callbacksRef.current.onIceCandidateGathered(ev.candidate.toJSON());
       } else {
-        log("info", "ICE gathering complete");
+        log("info", "ICE gathering complete (null candidate)");
       }
     };
 
-    pc.ontrack = (event) => {
-      const [remoteStream] = event.streams;
-      if (remoteStream) {
-        log("success", `Remote track received — kind: ${event.track.kind}`);
-        handlersRef.current.onRemoteStream(remoteStream);
-      }
+    pc.onicegatheringstatechange = () =>
+      log("info", `ICE gathering state → ${pc.iceGatheringState}`);
+
+    pc.oniceconnectionstatechange = () => {
+      log("info", `ICE connection state → ${pc.iceConnectionState}`);
+      setDebugInfo(d => ({ ...d, iceConnState: pc.iceConnectionState }));
     };
+
+    pc.onsignalingstatechange = () =>
+      log("info", `Signaling state → ${pc.signalingState}`);
 
     pc.onconnectionstatechange = () => {
-      const state = pc.connectionState;
-      const level = state === "connected" ? "success" : state === "failed" || state === "closed" ? "error" : "info";
-      log(level, `WebRTC connection state → ${state}`);
-      handlersRef.current.onConnectionStateChange(state);
+      const s = pc.connectionState;
+      const lvl = s === "connected" ? "success" : (s === "failed" || s === "closed") ? "error" : "info";
+      log(lvl, `WebRTC connection state → ${s}`);
+      setDebugInfo(d => ({ ...d, connState: s }));
+      callbacksRef.current.onConnectionStateChange(s);
     };
 
-    pc.onicegatheringstatechange = () => {
-      log("info", `ICE gathering state → ${pc.iceGatheringState}`);
-    };
-
-    pc.onsignalingstatechange = () => {
-      log("info", `Signaling state → ${pc.signalingState}`);
-    };
-
-    pc.onnegotiationneeded = async () => {
-      if (onOffer) {
-        try {
-          log("info", "Negotiation needed — creating offer");
-          const offer = await pc.createOffer();
-          await pc.setLocalDescription(offer);
-          log("info", "Local description set (offer) — sending to peer");
-          onOffer(pc.localDescription!);
-        } catch (err) {
-          log("error", `Negotiation error: ${(err as Error).message}`);
-        }
-      }
+    pc.ontrack = (ev) => {
+      log("success", `ontrack fired — kind:${ev.track.kind}, streams:${ev.streams.length}`);
+      const stream = ev.streams[0] ?? new MediaStream([ev.track]);
+      log("success", `Remote video srcObject set`);
+      setDebugInfo(d => ({ ...d, remoteStream: true }));
+      callbacksRef.current.onRemoteStream(stream);
     };
 
     return pc;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [log]);
 
-  const createOffer = useCallback(async (onOfferReady: (offer: RTCSessionDescriptionInit) => void) => {
-    const pc = createPeerConnection(onOfferReady);
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, localStreamRef.current!);
-        log("info", `Added local ${track.kind} track to peer connection`);
-      });
-    }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [createPeerConnection]);
+  // ─── Add local tracks to PC ─────────────────────────────────────────────────
+  const addLocalTracks = useCallback((pc: RTCPeerConnection) => {
+    const stream = localStreamRef.current;
+    if (!stream) { log("warn", "addLocalTracks: no local stream yet"); return; }
+    stream.getTracks().forEach(track => {
+      pc.addTrack(track, stream);
+      log("info", `Local ${track.kind} track added to PC (enabled:${track.enabled})`);
+    });
+  }, [log]);
 
-  const handleOffer = useCallback(async (offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> => {
-    const pc = createPeerConnection();
-    if (localStreamRef.current) {
-      localStreamRef.current.getTracks().forEach(track => {
-        pc.addTrack(track, localStreamRef.current!);
-        log("info", `Added local ${track.kind} track to peer connection`);
-      });
-    }
-    log("info", "Setting remote description (offer)");
+  // ─── Get local camera + mic ──────────────────────────────────────────────────
+  const getLocalStream = useCallback(async (q: VideoQuality = "medium"): Promise<MediaStream> => {
+    localStreamRef.current?.getTracks().forEach(t => t.stop());
+    log("info", `getUserMedia — quality:${q}`);
+    const stream = await navigator.mediaDevices.getUserMedia({
+      video: QUALITY_CONSTRAINTS[q],
+      audio: true,
+    });
+    localStreamRef.current = stream;
+    const hasV = stream.getVideoTracks().length > 0;
+    const hasA = stream.getAudioTracks().length > 0;
+    log("success", `Local media ready — video:${hasV} audio:${hasA}`);
+    setDebugInfo(d => ({ ...d, localVideo: hasV, localAudio: hasA }));
+    return stream;
+  }, [log]);
+
+  // ─── HOST: create offer ──────────────────────────────────────────────────────
+  const makeOffer = useCallback(async (): Promise<RTCSessionDescriptionInit> => {
+    const pc = buildPC();
+    addLocalTracks(pc);
+    log("info", "Creating offer…");
+    const offer = await pc.createOffer();
+    await pc.setLocalDescription(offer);
+    log("success", `Offer created — type:${offer.type}`);
+    return pc.localDescription!;
+  }, [buildPC, addLocalTracks, log]);
+
+  // ─── JOINER: receive offer, return answer ────────────────────────────────────
+  const makeAnswer = useCallback(async (offer: RTCSessionDescriptionInit): Promise<RTCSessionDescriptionInit> => {
+    const pc = buildPC();
+    addLocalTracks(pc);
+    log("info", "Setting remote description (offer)…");
     await pc.setRemoteDescription(new RTCSessionDescription(offer));
-    log("info", "Creating answer");
+    remoteDescSet.current = true;
+    await drainIceBuf(pc);
+    log("info", "Creating answer…");
     const answer = await pc.createAnswer();
     await pc.setLocalDescription(answer);
-    log("info", "Local description set (answer) — sending back");
+    log("success", `Answer created — type:${answer.type}`);
     return pc.localDescription!;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [createPeerConnection]);
+  }, [buildPC, addLocalTracks, drainIceBuf, log]);
 
-  const handleAnswer = useCallback(async (answer: RTCSessionDescriptionInit) => {
-    if (!pcRef.current) return;
-    log("info", "Setting remote description (answer)");
-    await pcRef.current.setRemoteDescription(new RTCSessionDescription(answer));
+  // ─── HOST: receive answer ────────────────────────────────────────────────────
+  const receiveAnswer = useCallback(async (answer: RTCSessionDescriptionInit) => {
+    const pc = pcRef.current;
+    if (!pc) { log("error", "receiveAnswer: no peer connection"); return; }
+    log("info", "Setting remote description (answer)…");
+    await pc.setRemoteDescription(new RTCSessionDescription(answer));
+    remoteDescSet.current = true;
     log("success", "Remote description set — negotiation complete");
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    await drainIceBuf(pc);
+  }, [drainIceBuf, log]);
 
+  // ─── Both: add incoming ICE candidate (with buffer) ─────────────────────────
   const addIceCandidate = useCallback(async (candidate: RTCIceCandidateInit) => {
-    if (!pcRef.current) return;
+    if (!pcRef.current || !remoteDescSet.current) {
+      log("info", "ICE candidate buffered (remote desc not yet set)");
+      iceCandidateBuf.current.push(candidate);
+      return;
+    }
     try {
       await pcRef.current.addIceCandidate(new RTCIceCandidate(candidate));
       log("info", "Remote ICE candidate added");
     } catch (err) {
-      log("error", `Failed to add ICE candidate: ${(err as Error).message}`);
+      log("error", `addIceCandidate error: ${(err as Error).message}`);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [log]);
 
+  // ─── Controls ────────────────────────────────────────────────────────────────
   const toggleAudio = useCallback(() => {
-    if (!localStreamRef.current) return;
-    localStreamRef.current.getAudioTracks().forEach(track => {
-      track.enabled = !track.enabled;
-    });
+    localStreamRef.current?.getAudioTracks().forEach(t => { t.enabled = !t.enabled; });
     setAudioMuted(m => !m);
   }, []);
 
   const toggleVideo = useCallback(() => {
-    if (!localStreamRef.current) return;
-    localStreamRef.current.getVideoTracks().forEach(track => {
-      track.enabled = !track.enabled;
-    });
+    localStreamRef.current?.getVideoTracks().forEach(t => { t.enabled = !t.enabled; });
     setVideoOff(v => !v);
   }, []);
 
-  const changeQuality = useCallback(async (newQuality: VideoQuality) => {
-    setQuality(newQuality);
-    if (!localStreamRef.current || !pcRef.current) return;
+  const changeQuality = useCallback(async (q: VideoQuality) => {
+    setQuality(q);
     try {
-      const newStream = await getLocalStream(newQuality);
-      const videoTrack = newStream.getVideoTracks()[0];
-      const sender = pcRef.current.getSenders().find(s => s.track?.kind === "video");
-      if (sender && videoTrack) {
-        await sender.replaceTrack(videoTrack);
-        log("success", `Video quality changed to ${newQuality}`);
-      }
+      const stream = await getLocalStream(q);
+      const sender = pcRef.current?.getSenders().find(s => s.track?.kind === "video");
+      const vTrack = stream.getVideoTracks()[0];
+      if (sender && vTrack) { await sender.replaceTrack(vTrack); }
+      log("success", `Quality changed → ${q}`);
     } catch (err) {
-      log("error", `Quality change error: ${(err as Error).message}`);
+      log("error", `Quality change failed: ${(err as Error).message}`);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [getLocalStream]);
+  }, [getLocalStream, log]);
 
   const hangUp = useCallback(() => {
-    log("warn", "Hanging up — closing peer connection and stopping tracks");
+    log("warn", "Hang up — closing PC and stopping tracks");
     pcRef.current?.close();
     pcRef.current = null;
     localStreamRef.current?.getTracks().forEach(t => t.stop());
     localStreamRef.current = null;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    remoteDescSet.current = false;
+    iceCandidateBuf.current = [];
+    setDebugInfo({ localVideo: false, localAudio: false, remoteStream: false, connState: "closed", iceConnState: "—" });
+  }, [log]);
 
-  const enablePictureInPicture = useCallback(async (videoEl: HTMLVideoElement) => {
+  const enablePiP = useCallback(async (el: HTMLVideoElement) => {
     try {
-      if (document.pictureInPictureElement) {
-        await document.exitPictureInPicture();
-      } else {
-        await videoEl.requestPictureInPicture();
-      }
+      if (document.pictureInPictureElement) await document.exitPictureInPicture();
+      else await el.requestPictureInPicture();
     } catch (err) {
-      log("error", `PiP error: ${(err as Error).message}`);
+      log("error", `PiP: ${(err as Error).message}`);
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [log]);
 
   return {
     localStreamRef,
     getLocalStream,
-    createOffer,
-    handleOffer,
-    handleAnswer,
+    makeOffer,
+    makeAnswer,
+    receiveAnswer,
     addIceCandidate,
     toggleAudio,
     toggleVideo,
     changeQuality,
     hangUp,
-    enablePictureInPicture,
+    enablePiP,
     audioMuted,
     videoOff,
     quality,
+    debugInfo,
   };
 }

@@ -1,0 +1,59 @@
+Both devices now connect to the same signaling server, but neither device can see the other device’s camera.
+
+Please debug and fix the WebRTC media connection.
+
+Most likely issues to check:
+1. Local camera stream is not being added to RTCPeerConnection before creating offer/answer.
+2. remoteVideo.srcObject is not being set inside pc.ontrack.
+3. ICE candidates are not being sent/received correctly.
+4. STUN/TURN config is missing or incomplete.
+5. Both devices are creating offers at the same time.
+6. The second device joins the room but does not trigger the correct offer/answer flow.
+7. Browser autoplay restrictions are preventing remote video/audio playback.
+8. Mobile video elements are missing playsInline, autoPlay, or muted on local preview.
+9. Camera/microphone permissions are not fully granted.
+10. The app is creating multiple peer connections and using the wrong one.
+
+Required fixes:
+- Get local media first using navigator.mediaDevices.getUserMedia({ video: true, audio: true }).
+- Display local camera preview immediately.
+- Add every local stream track to the RTCPeerConnection before creating an offer or answer.
+- Use one RTCPeerConnection per peer.
+- Only the first user/host should create the offer.
+- The second user should receive the offer, setRemoteDescription, createAnswer, setLocalDescription, then send answer.
+- Both users must exchange ICE candidates.
+- Set remote video like this when tracks arrive:
+  remoteVideo.srcObject = event.streams[0]
+- Add clear visible logs for:
+  local media started
+  local tracks added
+  offer created
+  offer received
+  answer created
+  answer received
+  ICE sent
+  ICE received
+  ontrack fired
+  remote video srcObject set
+  connection state
+  ICE connection state
+- Add error handling around every WebRTC step.
+
+Video element requirements:
+- local video must have autoplay, playsInline, muted
+- remote video must have autoplay and playsInline
+- remote video should call play().catch(...) after setting srcObject
+
+Also add this debugging display:
+Show whether each user has:
+- local video track active
+- local audio track active
+- remote stream received
+- peer connection state
+- ICE connection state
+
+Expected result:
+When User 1 creates a room and User 2 joins via invite link, both devices should show:
+- their own local preview
+- the other user’s camera video
+- working two-way audio
