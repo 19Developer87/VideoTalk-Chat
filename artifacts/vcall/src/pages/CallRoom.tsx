@@ -39,6 +39,14 @@ export function CallRoom() {
     probed:       false,
   });
 
+  // ─── PiP state ───────────────────────────────────────────────────────────────
+  // Tracks whether the remote video is currently in a PiP window.
+  // When true, all in-app controls are locked (inert + keydown blocked) so that
+  // remote-control / keyboard presses cannot accidentally mute, hang up, etc.
+  // The WebRTC connection is NEVER touched on PiP enter/leave.
+  const [isPiPActive, setIsPiPActive] = useState(false);
+  const controlsBarRef = useRef<HTMLDivElement>(null);
+
   // ─── Call quality indicator ──────────────────────────────────────────────────
   type CallQuality = "excellent" | "good" | "fair" | "poor";
   const [callQuality, setCallQuality] = useState<CallQuality | null>(null);
@@ -404,6 +412,66 @@ export function CallRoom() {
     return undefined;
   }, [status]);
 
+  // ─── PiP enter / leave tracking ──────────────────────────────────────────────
+  // Listens on the remote <video> element for browser PiP lifecycle events.
+  // We must NOT touch WebRTC, the peer connection, or the signaling socket here.
+  useEffect(() => {
+    const video = remoteVideoRef.current;
+    if (!video) return;
+
+    const onEnter = () => {
+      setIsPiPActive(true);
+      addLog("info", "Entered PiP mode — controls locked");
+      // Remove focus from whatever button had it so remote OK/Enter can't fire it
+      (document.activeElement as HTMLElement | null)?.blur();
+    };
+
+    const onLeave = () => {
+      setIsPiPActive(false);
+      addLog("info", "Left PiP mode — controls restored");
+    };
+
+    video.addEventListener("enterpictureinpicture", onEnter);
+    video.addEventListener("leavepictureinpicture", onLeave);
+    return () => {
+      video.removeEventListener("enterpictureinpicture", onEnter);
+      video.removeEventListener("leavepictureinpicture", onLeave);
+    };
+  }, [addLog]);
+
+  // ─── Keydown blocker during PiP ──────────────────────────────────────────────
+  // Remote-control devices send keyboard events (Enter, Space, Arrow keys, OK).
+  // During PiP, intercept these in the capture phase before any element handles
+  // them — so a d-pad OK press cannot activate a focused button.
+  useEffect(() => {
+    if (!isPiPActive) return;
+    const block = (e: KeyboardEvent) => {
+      const actionKeys = [" ", "Enter", "Escape",
+                          "ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"];
+      if (actionKeys.includes(e.key)) {
+        e.preventDefault();
+        e.stopImmediatePropagation();
+        addLog("info", `Controls locked (PiP active) — "${e.key}" blocked`);
+      }
+    };
+    window.addEventListener("keydown", block, /* capture */ true);
+    return () => window.removeEventListener("keydown", block, true);
+  }, [isPiPActive, addLog]);
+
+  // ─── Inert controls bar during PiP ───────────────────────────────────────────
+  // The HTML `inert` attribute disables all pointer, keyboard, and focus
+  // interaction on a subtree without changing its visual appearance.
+  // This is the safest single-line lock for the entire controls bar.
+  useEffect(() => {
+    const el = controlsBarRef.current;
+    if (!el) return;
+    if (isPiPActive) {
+      el.setAttribute("inert", "");
+    } else {
+      el.removeAttribute("inert");
+    }
+  }, [isPiPActive]);
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
   const copyInvite = useCallback(async () => {
     await navigator.clipboard.writeText(inviteLink);
@@ -573,6 +641,25 @@ export function CallRoom() {
         </div>
       )}
 
+      {/* ── PiP active overlay ───────────────────────────────────────────────────
+          Shown in the main window while the call video is floating in PiP.
+          pointer-events-none: clicks fall through (the controls bar is already
+          inert, but this overlay makes the locked state visually obvious).
+          The WebRTC connection continues uninterrupted behind this screen.    */}
+      {isPiPActive && (
+        <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-zinc-950/85 backdrop-blur-sm pointer-events-none select-none">
+          <div className="text-center px-8">
+            <div className="w-16 h-16 rounded-full bg-violet-500/20 flex items-center justify-center mx-auto mb-5">
+              <PictureInPicture2 className="w-8 h-8 text-violet-400" />
+            </div>
+            <p className="text-white text-lg font-semibold">Call is in PiP mode</p>
+            <p className="text-zinc-400 text-sm mt-2 leading-relaxed">
+              Return to the full app to control or end the call.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* ── Reconnecting banner (shown ON TOP of the live call video) ──────────
           Keeps the call screen intact so the user isn't sent back to home.
           Disappears as soon as connection recovers.                           */}
@@ -717,8 +804,10 @@ export function CallRoom() {
 
       {/* Controls bar — call-ctrl-bottom adds safe-area-inset-bottom so the bar
           clears the Android gesture/button navigation bar on all devices.
-          call-controls-inner enables horizontal scroll when buttons overflow. */}
-      <div className="call-ctrl-bottom absolute left-0 right-0 z-20 flex items-center justify-center px-4">
+          call-controls-inner enables horizontal scroll when buttons overflow.
+          controlsBarRef receives the HTML `inert` attribute while PiP is active,
+          which disables all interaction without changing visual appearance.   */}
+      <div ref={controlsBarRef} className="call-ctrl-bottom absolute left-0 right-0 z-20 flex items-center justify-center px-4">
         <div className="call-controls-inner flex items-center gap-3 bg-zinc-900/90 backdrop-blur-md border border-zinc-700 rounded-2xl px-4 py-3 shadow-2xl">
 
           {/* Mic button — disabled and permanently muted icon when no microphone */}
@@ -759,8 +848,13 @@ export function CallRoom() {
 
           <button
             onClick={handleHangUp}
-            className="w-14 h-12 rounded-xl flex items-center justify-center bg-red-600 hover:bg-red-500 active:bg-red-700 text-white transition"
-            title="End call"
+            disabled={isPiPActive}
+            className={`w-14 h-12 rounded-xl flex items-center justify-center text-white transition ${
+              isPiPActive
+                ? "bg-red-600/40 cursor-not-allowed"
+                : "bg-red-600 hover:bg-red-500 active:bg-red-700"
+            }`}
+            title={isPiPActive ? "Return to full app to end the call" : "End call"}
           >
             <PhoneOff className="w-5 h-5" />
           </button>
