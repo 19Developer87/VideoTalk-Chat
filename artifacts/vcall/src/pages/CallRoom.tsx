@@ -531,6 +531,26 @@ export function CallRoom() {
     setShowSettings(false);
   }, [webrtc]);
 
+  const handlePiPClick = useCallback(async () => {
+    addLog("info", "PiP button pressed");
+    const video = remoteVideoRef.current;
+    if (!video) {
+      addLog("warn", "No remote video available for PiP yet");
+      return;
+    }
+    if (!("pictureInPictureEnabled" in document) || !document.pictureInPictureEnabled || !video.requestPictureInPicture) {
+      addLog("warn", "PiP unavailable on this device/browser");
+      return;
+    }
+    if (document.pictureInPictureElement) {
+      addLog("info", "Leaving system PiP");
+      await document.exitPictureInPicture();
+      return;
+    }
+    addLog("info", "Entering system PiP");
+    await webrtc.enablePiP(video);
+  }, [addLog, webrtc]);
+
   // ─── Float position → CSS style ──────────────────────────────────────────────
   // Maps each of the 8 positions to absolute CSS values.
   // Bottom positions clear the controls bar (~90px).
@@ -1019,7 +1039,7 @@ export function CallRoom() {
           {/* System PiP — position controlled by the OS/device */}
           {"pictureInPictureEnabled" in document && (
             <button
-              onClick={() => remoteVideoRef.current && webrtc.enablePiP(remoteVideoRef.current)}
+              onClick={handlePiPClick}
               className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
                 isPiPActive ? "bg-violet-600 text-white" : "bg-zinc-800 text-white hover:bg-zinc-700"
               }`}
