@@ -1,0 +1,66 @@
+Fix Android front/back camera switching.
+
+Problem:
+The Switch Camera button reacts/clicks, but the camera does not actually change on Android.
+
+Do not rebuild the app.
+Do not change WebRTC, TURN, ICE, room joining, PiP, or signaling logic.
+
+Likely issue:
+Android often does not switch properly using deviceId alone. It may need facingMode switching between:
+- "user" for front camera
+- "environment" for back camera
+
+Required behaviour:
+- On Android/mobile, Switch Camera should toggle between front and back camera.
+- Remote user must see the new camera feed.
+- Local preview must update immediately.
+- Audio must continue working.
+- Call must not reconnect or hang up.
+
+Implementation requirements:
+1. Track current facing mode:
+   - currentFacingMode = "user" or "environment"
+
+2. When Switch Camera is clicked:
+   - stop only the old video track
+   - keep the existing audio track
+   - request a new video track using:
+     { video: { facingMode: { exact: "environment" } }, audio: false }
+   - if exact fails, retry with:
+     { video: { facingMode: "environment" }, audio: false }
+   - toggle back to:
+     { video: { facingMode: "user" }, audio: false }
+
+3. Replace the WebRTC video sender track:
+   const sender = peerConnection
+     .getSenders()
+     .find(s => s.track && s.track.kind === "video");
+
+   await sender.replaceTrack(newVideoTrack);
+
+4. Update local preview:
+   - create/update local stream with the existing audio track and new video track
+   - set localVideoRef.current.srcObject = updatedStream
+   - call localVideoRef.current.play().catch(...)
+
+5. Only fallback to deviceId switching on desktop/Windows.
+
+Add logs:
+- “Switch Camera clicked”
+- “Current facingMode: user/environment”
+- “Trying facingMode exact environment/user”
+- “Exact facingMode failed, trying fallback”
+- “New video track acquired”
+- “Replacing WebRTC sender video track”
+- “Sender video track replaced”
+- “Local preview updated”
+- “Camera switched successfully”
+- “Camera switch failed: [error]”
+
+Important:
+- Do not request audio again during camera switching.
+- Do not stop the audio track.
+- Do not recreate RTCPeerConnection.
+- Do not call getUserMedia with both audio and video during switch.
+- Do not rely only on enumerateDevices/deviceId on Android.

@@ -407,26 +407,36 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
       log("warn", "Camera switch failed: no local stream");
       return null;
     }
-    const currentIndex = current.getVideoTracks().length > 0 ? 0 : -1;
-    log("info", `Current camera index: ${currentIndex}`);
+    const currentTrack = current.getVideoTracks()[0];
+    const currentFacingMode = (currentTrack?.getSettings().facingMode as "user" | "environment" | undefined) ?? "user";
+    const nextFacingMode = currentFacingMode === "user" ? "environment" : "user";
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
+    log("info", `Current facingMode: ${currentFacingMode}`);
     try {
-      const devices = await navigator.mediaDevices.enumerateDevices();
-      const cameras = devices.filter(d => d.kind === "videoinput");
-      log("info", `Available cameras: ${cameras.length}`);
-      const target = deviceId ? `deviceId:${deviceId}` : "facingMode:environment";
-      log("info", `Switching camera to ${target}`);
       log("info", "Requesting new camera stream…");
-      const attempt = async (constraints: MediaStreamConstraints) =>
-        navigator.mediaDevices.getUserMedia({ video: constraints.video, audio: false });
       let stream: MediaStream;
-      try {
-        stream = await attempt({
-          video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } },
-          audio: false,
-        });
-      } catch {
-        stream = await attempt({
-          video: { facingMode: { ideal: deviceId ? "environment" : "user" } },
+      if (isMobile) {
+        log("info", `Trying facingMode exact ${nextFacingMode}`);
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: { exact: nextFacingMode } },
+            audio: false,
+          });
+        } catch (err) {
+          log("warn", "Exact facingMode failed, trying fallback");
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { facingMode: nextFacingMode },
+            audio: false,
+          });
+        }
+      } else {
+        const devices = await navigator.mediaDevices.enumerateDevices();
+        const cameras = devices.filter(d => d.kind === "videoinput");
+        log("info", `Available cameras: ${cameras.length}`);
+        const target = deviceId ? `deviceId:${deviceId}` : `facingMode:${nextFacingMode}`;
+        log("info", `Switching camera to ${target}`);
+        stream = await navigator.mediaDevices.getUserMedia({
+          video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: nextFacingMode } },
           audio: false,
         });
       }
@@ -435,9 +445,9 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
       log("success", "New video track acquired");
       const sender = pcRef.current?.getSenders().find(s => s.track?.kind === "video");
       if (sender) {
-        log("info", "Replacing sender track…");
+        log("info", "Replacing WebRTC sender video track");
         await sender.replaceTrack(newVideoTrack);
-        log("success", "Sender track replaced");
+        log("success", "Sender video track replaced");
       }
       const oldVideoTrack = current.getVideoTracks()[0];
       if (oldVideoTrack && oldVideoTrack !== newVideoTrack) {
@@ -452,6 +462,7 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
       callbacksRef.current.onLocalStreamUpdated?.(nextStream);
       setDebugInfo(d => ({ ...d, localVideo: true, localAudio: current.getAudioTracks().length > 0 }));
       log("success", "Local preview updated");
+      log("success", "Camera switched successfully");
       return nextStream;
     } catch (err) {
       log("error", `Camera switch failed: ${(err as Error).message}`);
