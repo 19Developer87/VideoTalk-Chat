@@ -336,10 +336,38 @@ export function CallRoom() {
   }, []);
 
   useEffect(() => {
-    if (!webrtc.videoOff && localVideoRef.current && webrtc.localStreamRef.current) {
-      localVideoRef.current.srcObject = webrtc.localStreamRef.current;
-    }
-  }, [webrtc.videoOff, webrtc.localStreamRef]);
+    if (status !== "connected") return;
+    const el = localVideoRef.current;
+    const stream = webrtc.localStreamRef.current;
+    addLog("info", "Call connected — attaching local preview");
+    addLog("info", `Local preview element exists: ${!!el}`);
+    addLog("info", `Local stream exists: ${!!stream}`);
+    if (!el || !stream) return;
+    addLog("info", `Local video tracks: ${stream.getVideoTracks().length}`);
+    el.srcObject = stream;
+    el.play()
+      .then(() => addLog("success", "Local preview play success"))
+      .catch(err => addLog("error", `Local preview play failed: ${(err as Error).message}`));
+  }, [addLog, status, webrtc.localStreamRef, webrtc.videoOff, cameraIndex]);
+
+  useEffect(() => {
+    if (status !== "connected") return;
+    const el = localVideoRef.current;
+    const stream = webrtc.localStreamRef.current;
+    addLog("info", "Call connected — attaching local preview");
+    addLog("info", `Local preview element exists: ${!!el}`);
+    addLog("info", `Local stream exists: ${!!stream}`);
+    if (!el || !stream) return;
+    addLog("info", `Local video tracks: ${stream.getVideoTracks().length}`);
+    el.srcObject = stream;
+    el.play()
+      .then(() => {
+        addLog("success", "Local preview play success");
+      })
+      .catch(err => {
+        addLog("error", `Local preview play failed: ${(err as Error).message}`);
+      });
+  }, [addLog, status, webrtc.localStreamRef, webrtc.videoOff, cameraIndex]);
 
   useEffect(() => {
     if (!webrtc.localStreamRef.current) return;
