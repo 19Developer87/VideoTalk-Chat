@@ -1,0 +1,74 @@
+Fix Switch Camera getting stuck and not switching on Android.
+
+Current problem:
+- Switch Camera button stays “pressed/on” after clicking.
+- Camera does not switch from front to back.
+- Android camera switching is still not working.
+
+Important:
+Switch Camera should be a momentary action button, not an on/off toggle.
+
+Required UI behaviour:
+- Button text: “Switch Camera”
+- When clicked, briefly show “Switching…”
+- Then return to “Switch Camera”
+- Do not keep the button active/on/selected
+- Disable the button only while switching is in progress
+
+Required implementation:
+- Add state:
+  isSwitchingCamera
+  currentFacingMode
+- On click:
+  if isSwitchingCamera is true, ignore click
+  set isSwitchingCamera true
+  try switch camera
+  finally set isSwitchingCamera false
+
+Android-specific switching:
+- Do not rely only on deviceId.
+- Toggle facingMode:
+  user → environment
+  environment → user
+
+Use this order:
+1. Stop old video track first
+2. Request new video-only stream with facingMode
+3. Replace WebRTC sender track
+4. Update local preview
+5. Update currentFacingMode only after success
+
+Use fallback attempts:
+- Try:
+  video: { facingMode: { exact: nextFacingMode } }
+- If that fails, try:
+  video: { facingMode: nextFacingMode }
+- If that fails, restart the old camera so the user is not left without video
+
+Important:
+- Do not request audio when switching camera
+- Do not stop audio track
+- Do not recreate peer connection
+- Do not hang up
+- Do not reconnect the room
+- Do not leave the button stuck active
+
+Add detailed logs:
+- Switch Camera clicked
+- Current facing mode
+- Next facing mode
+- Old video track stopped
+- Requesting new camera
+- New video track label
+- Sender found true/false
+- replaceTrack success/failure
+- Local preview updated
+- Switch camera complete
+- Switch camera failed, restoring previous camera
+- isSwitchingCamera reset
+
+Also check:
+- The button’s onClick is not using cameraOn/cameraEnabled state.
+- The button is not sharing logic with the Camera On/Off toggle.
+- Switch Camera must have its own separate handler.
+- Switch Camera must not call toggleCamera().
