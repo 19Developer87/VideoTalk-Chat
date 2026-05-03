@@ -28,8 +28,13 @@ export function useSignaling(callbacks: SignalingCallbacks) {
   };
 
   useEffect(() => {
-    const serverUrl  = window.location.origin;
-    const socketPath = "/api/socket.io";
+    // On web: use the current origin (relative — works in Replit + production).
+    // On Capacitor/Android: window.location is "capacitor://localhost" which is
+    // not the signaling server. Set VITE_SIGNALING_URL at build time to override:
+    //   VITE_SIGNALING_URL=https://your-app.replit.app pnpm build:android
+    const overrideUrl = import.meta.env.VITE_SIGNALING_URL as string | undefined;
+    const serverUrl   = overrideUrl?.replace(/\/$/, "") || window.location.origin;
+    const socketPath  = "/api/socket.io";
 
     log("info", `Frontend loaded at ${window.location.href}`);
     log("info", `Connecting to signaling server → ${serverUrl}${socketPath}`);

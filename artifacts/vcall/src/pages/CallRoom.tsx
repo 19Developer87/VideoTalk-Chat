@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
 import { useSignaling } from "@/hooks/useSignaling";
 import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
+import { useCapacitorPiP } from "@/hooks/useCapacitorPiP";
 import { DebugLog, LogEntry } from "@/components/DebugLog";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
@@ -47,6 +48,11 @@ export function CallRoom() {
   // The WebRTC connection is NEVER touched on PiP enter/leave.
   const [isPiPActive, setIsPiPActive] = useState(false);
   const controlsBarRef = useRef<HTMLDivElement>(null);
+
+  // ─── Capacitor / Android native PiP bridge ───────────────────────────────────
+  // On web: isNativeAndroid=false, falls through to browser PiP below.
+  // On Android APK: isNativeAndroid=true, uses the native PiP plugin.
+  const capacitorPiP = useCapacitorPiP();
 
   // ─── In-app floating video window ────────────────────────────────────────────
   // A custom mini <video> inside the app that mirrors the remote stream.
@@ -429,10 +435,13 @@ export function CallRoom() {
     return undefined;
   }, [status]);
 
-  // ─── PiP enter / leave tracking ──────────────────────────────────────────────
+  // ─── PiP enter / leave tracking — browser ────────────────────────────────────
   // Listens on the remote <video> element for browser PiP lifecycle events.
+  // Skipped on Capacitor Android (native plugin events are used instead).
   // We must NOT touch WebRTC, the peer connection, or the signaling socket here.
   useEffect(() => {
+    if (capacitorPiP.isNativeAndroid) return;  // native path handles state
+
     const video = remoteVideoRef.current;
     if (!video) return;
 
@@ -454,7 +463,25 @@ export function CallRoom() {
       video.removeEventListener("enterpictureinpicture", onEnter);
       video.removeEventListener("leavepictureinpicture", onLeave);
     };
-  }, [addLog]);
+  }, [addLog, capacitorPiP.isNativeAndroid]);
+
+  // ─── PiP enter / leave tracking — Capacitor Android ─────────────────────────
+  // The native plugin fires 'pipStateChange' events (forwarded by MainActivity).
+  // Sync them into the isPiPActive state and lock/unlock controls identically to
+  // the browser path above.
+  useEffect(() => {
+    if (!capacitorPiP.isNativeAndroid) return;
+    if (capacitorPiP.isInPip === isPiPActive) return;
+
+    if (capacitorPiP.isInPip) {
+      setIsPiPActive(true);
+      addLog("info", "Entered native Android PiP — controls locked");
+      (document.activeElement as HTMLElement | null)?.blur();
+    } else {
+      setIsPiPActive(false);
+      addLog("info", "Left native Android PiP — controls restored");
+    }
+  }, [capacitorPiP.isNativeAndroid, capacitorPiP.isInPip, isPiPActive, addLog]);
 
   // ─── Keydown blocker during PiP ──────────────────────────────────────────────
   // Remote-control devices send keyboard events (Enter, Space, Arrow keys, OK).
@@ -533,6 +560,26 @@ export function CallRoom() {
 
   const handlePiPClick = useCallback(async () => {
     addLog("info", "PiP button pressed");
+
+    // ── Native Android PiP (Capacitor APK) ─────────────────────────────────
+    // The whole app moves to a PiP window; the WebView shows only the remote
+    // video because the rest of the UI is simply not visible at that size.
+    // Controls are locked via isPiPActive (synced from native plugin events).
+    if (capacitorPiP.isNativeAndroid) {
+      if (!capacitorPiP.isNativeSupported) {
+        addLog("warn", "Native Android PiP requires Android 8.0+ — not supported on this device");
+        return;
+      }
+      try {
+        addLog("info", "Entering native Android PiP");
+        await capacitorPiP.enterNativePiP();
+      } catch (err) {
+        addLog("error", `Native Android PiP failed: ${(err as Error).message}`);
+      }
+      return;
+    }
+
+    // ── Browser PiP fallback (web / Replit preview) ─────────────────────────
     const video = remoteVideoRef.current;
     if (!video) {
       addLog("warn", "No remote video available for PiP yet");
@@ -549,7 +596,7 @@ export function CallRoom() {
     }
     addLog("info", "Entering system PiP");
     await webrtc.enablePiP(video);
-  }, [addLog, webrtc]);
+  }, [addLog, webrtc, capacitorPiP]);
 
   // ─── Float position → CSS style ──────────────────────────────────────────────
   // Maps each of the 8 positions to absolute CSS values.
@@ -1036,14 +1083,22 @@ export function CallRoom() {
             {copied ? <CheckCheck className="w-5 h-5 text-emerald-400" /> : <Copy className="w-5 h-5" />}
           </button>
 
-          {/* System PiP — position controlled by the OS/device */}
-          {"pictureInPictureEnabled" in document && (
+          {/* System PiP — shown on browser (pictureInPictureEnabled) OR on
+              Android Capacitor (capacitorPiP.isNativeSupported). */}
+          {(("pictureInPictureEnabled" in document && document.pictureInPictureEnabled)
+            || capacitorPiP.isNativeAndroid) && (
             <button
               onClick={handlePiPClick}
               className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
                 isPiPActive ? "bg-violet-600 text-white" : "bg-zinc-800 text-white hover:bg-zinc-700"
               }`}
-              title={isPiPActive ? "Exit system PiP" : "System Picture-in-Picture (position set by device)"}
+              title={
+                isPiPActive
+                  ? "Exit system PiP"
+                  : capacitorPiP.isNativeAndroid
+                    ? "Picture-in-Picture (Android native)"
+                    : "System Picture-in-Picture (position set by device)"
+              }
             >
               <PictureInPicture2 className="w-5 h-5" />
             </button>
