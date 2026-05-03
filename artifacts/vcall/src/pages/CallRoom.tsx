@@ -31,6 +31,7 @@ export function CallRoom() {
   const [copied,        setCopied       ] = useState(false);
   const [copiedCode,    setCopiedCode   ] = useState(false);
   const [logs,          setLogs         ] = useState<LogEntry[]>([]);
+  const [peerCount,     setPeerCount    ] = useState(0);
 
   // ─── Device capabilities ─────────────────────────────────────────────────────
   // Probed via enumerateDevices() before requesting getUserMedia.
@@ -194,6 +195,7 @@ export function CallRoom() {
 
     // Both users receive this after join-room (including after reconnect)
     onJoinedRoom: ({ peers, isInitiator }) => {
+      setPeerCount(Math.max(1, peers.length + 1));
       if (isInitiator) {
         // HOST — will send offer when peer-joined fires
         isInitiatorRef.current = false; // will be set true in onPeerJoined
@@ -213,6 +215,7 @@ export function CallRoom() {
 
     // Whoever receives peer-joined becomes the offerer for this session
     onPeerJoined: async ({ socketId, displayName: name }) => {
+      setPeerCount(2);
       remotePeerRef.current = socketId;
       setPeerName(name);
       isInitiatorRef.current = true; // this peer is now responsible for offers
@@ -269,6 +272,7 @@ export function CallRoom() {
     // Only emitted by server after grace timer expires or explicit leave-room
     onPeerLeft: () => {
       addLog("warn", "Peer left the call (server confirmed)");
+      setPeerCount(1);
       setStatus("disconnected");
       setStatusMessage("Peer left the call");
       setPeerName("");
@@ -647,6 +651,7 @@ export function CallRoom() {
 
   // Full overlay shown when NOT in a call and NOT reconnecting
   const showFullOverlay = status !== "connected" && status !== "reconnecting";
+  const showLocalPreview = !webrtc.videoOff && devCaps.hasCamera && (peerCount >= 2 || status === "connected");
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
@@ -862,8 +867,8 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Local video preview — only rendered when a camera is available */}
-      {!webrtc.videoOff && devCaps.hasCamera && (
+      {/* Local video preview — only rendered once the second peer is connected */}
+      {showLocalPreview && (
         <div className="call-ctrl-above-28 absolute right-4 z-20 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
           <video
             ref={localVideoRef}
