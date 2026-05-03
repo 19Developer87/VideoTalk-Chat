@@ -6,7 +6,7 @@ import { DebugLog, LogEntry } from "@/components/DebugLog";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
   PictureInPicture2, Minimize2, X, Link,
-  Wifi, WifiOff, Loader2, CheckCheck, Users, Terminal,
+  Wifi, WifiOff, Loader2, CheckCheck, Users,
 } from "lucide-react";
 
 // "reconnecting" keeps the call screen open with a banner overlay.
@@ -26,7 +26,7 @@ export function CallRoom() {
   const [status,        setStatus       ] = useState<ConnectionStatus>("connecting");
   const [statusMessage, setStatusMessage] = useState("Connecting to server…");
   const [showSettings,  setShowSettings ] = useState(false);
-  const [showDebug,     setShowDebug    ] = useState(true);
+  const [showDebug,     setShowDebug    ] = useState(() => localStorage.getItem("showDebug") === "true");
   const [copied,        setCopied       ] = useState(false);
   const [copiedCode,    setCopiedCode   ] = useState(false);
   const [logs,          setLogs         ] = useState<LogEntry[]>([]);
@@ -879,8 +879,8 @@ export function CallRoom() {
           <div className="mt-4 pt-4 border-t border-zinc-800">
             <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Floating Video Position</p>
             <p className="text-zinc-600 text-xs mb-3 leading-relaxed">
-              In-app floating position can be customised here.
               System PiP position is controlled by your device.
+              In-app floating video position can be customised here.
             </p>
             {/* 3×3 direction grid */}
             <div className="grid grid-cols-3 gap-1">
@@ -907,6 +907,27 @@ export function CallRoom() {
                   )
                 )
               )}
+            </div>
+          </div>
+
+          {/* Debug logs toggle */}
+          <div className="mt-4 pt-4 border-t border-zinc-800">
+            <div className="flex items-center justify-between gap-3">
+              <div>
+                <p className="text-zinc-300 text-sm font-medium">Show debug logs</p>
+                <p className="text-zinc-600 text-xs mt-0.5">For troubleshooting only</p>
+              </div>
+              <button
+                onClick={() => {
+                  const next = !showDebug;
+                  setShowDebug(next);
+                  localStorage.setItem("showDebug", String(next));
+                }}
+                className={`relative flex-shrink-0 w-10 h-6 rounded-full transition-colors ${showDebug ? "bg-violet-600" : "bg-zinc-700"}`}
+                title={showDebug ? "Hide debug logs" : "Show debug logs"}
+              >
+                <span className={`absolute top-1 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200 ${showDebug ? "translate-x-5" : "translate-x-1"}`} />
+              </button>
             </div>
           </div>
         </div>
@@ -1008,11 +1029,11 @@ export function CallRoom() {
             </button>
           )}
 
-          {/* In-app floating video — position is user-selectable in Settings */}
+          {/* In-app floating video — desktop only; hidden on mobile (use system PiP on Android) */}
           <button
             onClick={() => setIsFloatActive(f => !f)}
             disabled={isPiPActive}
-            className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
+            className={`hidden sm:flex w-12 h-12 rounded-xl items-center justify-center transition ${
               isFloatActive && !isPiPActive
                 ? "bg-violet-600 text-white"
                 : isPiPActive
@@ -1026,16 +1047,6 @@ export function CallRoom() {
             }
           >
             <Minimize2 className="w-5 h-5" />
-          </button>
-
-          <button
-            onClick={() => setShowDebug(s => !s)}
-            className={`w-12 h-12 rounded-xl flex items-center justify-center transition ${
-              showDebug ? "bg-violet-600 text-white" : "bg-zinc-800 text-white hover:bg-zinc-700"
-            }`}
-            title="Toggle debug log"
-          >
-            <Terminal className="w-5 h-5" />
           </button>
 
           <button
