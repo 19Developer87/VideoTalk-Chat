@@ -14,8 +14,8 @@ type ChatPanelProps = {
   onInputChange: (value: string) => void;
   onSend: () => void;
   onClose: () => void;
-  inputRef?: RefObject<HTMLTextAreaElement>;
-  listRef?: RefObject<HTMLDivElement>;
+  inputRef?: RefObject<HTMLTextAreaElement | null>;
+  listRef?: RefObject<HTMLDivElement | null>;
 };
 
 export function ChatPanel({ open, messages, input, onInputChange, onSend, onClose, inputRef, listRef }: ChatPanelProps) {
