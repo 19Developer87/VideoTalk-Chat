@@ -419,7 +419,7 @@ export function CallRoom() {
         </div>
         <div className="relative flex-1">
           <video ref={remoteVideoRef} autoPlay playsInline className="h-full w-full object-cover bg-black" />
-          <video ref={localVideoRef} autoPlay muted playsInline className="absolute bottom-4 right-4 h-36 w-48 rounded-xl border border-white/10 object-cover shadow-lg" />
+          {showLocalPreview ? <video ref={localVideoRef} autoPlay muted playsInline className="absolute bottom-4 right-4 h-36 w-48 rounded-xl border border-white/10 object-cover shadow-lg" /> : null}
           <div className="absolute left-4 top-4 rounded-full bg-black/50 px-3 py-1 text-xs">{statusMessage}</div>
           <div className="absolute bottom-4 left-4 flex gap-2">
             <button onClick={handlePiPClick} className="rounded-full bg-black/50 p-3"><PictureInPicture2 className="h-4 w-4" /></button>
