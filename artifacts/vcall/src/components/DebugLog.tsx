@@ -8,7 +8,7 @@ export interface LogEntry {
 }
 
 interface DebugLogProps {
-  entries?: LogEntry[];
+  entries: LogEntry[];
   onClose: () => void;
 }
 
@@ -26,13 +26,12 @@ const levelPrefix: Record<LogEntry["level"], string> = {
   error: "✗",
 };
 
-export function DebugLog({ entries = [], onClose }: DebugLogProps) {
+export function DebugLog({ entries, onClose }: DebugLogProps) {
   const bottomRef = useRef<HTMLDivElement>(null);
-  const safeEntries = Array.isArray(entries) ? entries : [];
 
   useEffect(() => {
     bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [safeEntries]);
+  }, [entries]);
 
   return (
     <div className="absolute top-4 left-4 right-4 bottom-24 pointer-events-none z-50 flex items-start">
@@ -44,10 +43,10 @@ export function DebugLog({ entries = [], onClose }: DebugLogProps) {
           </button>
         </div>
         <div className="overflow-y-auto max-h-80 p-2 font-mono text-xs space-y-0.5">
-          {safeEntries.length === 0 && (
-            <p className="text-zinc-600 px-1 py-2">No debug logs yet.</p>
+          {entries.length === 0 && (
+            <p className="text-zinc-600 px-1 py-2">Waiting for events…</p>
           )}
-          {safeEntries.map((e, i) => (
+          {entries.map((e, i) => (
             <div key={i} className={`flex gap-2 px-1 py-0.5 rounded ${levelColor[e.level]}`}>
               <span className="text-zinc-600 shrink-0">{e.time}</span>
               <span className="shrink-0">{levelPrefix[e.level]}</span>

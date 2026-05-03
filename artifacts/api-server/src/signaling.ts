@@ -95,7 +95,6 @@ export function setupSignaling(httpServer: HttpServer): void {
     });
 
     // Forward offer — pass through any extra flags (e.g. isRestart).
-    // Using `unknown` for SDP payloads: this is a relay server, we don't inspect the contents.
     socket.on("offer", (payload: { to: string; offer: unknown; isRestart?: boolean }) => {
       io.to(payload.to).emit("offer", {
         from: socket.id,
@@ -127,8 +126,6 @@ export function setupSignaling(httpServer: HttpServer): void {
     });
 
     // Unintentional socket drop — start grace timer before emitting peer-left.
-    // If the peer reconnects (same roomId + displayName) within DISCONNECT_GRACE_MS,
-    // the timer is cancelled and peer-left is never sent.
     socket.on("disconnect", () => {
       const s = socket as ExtendedSocket;
       const { roomId, displayName } = s;
@@ -144,7 +141,6 @@ export function setupSignaling(httpServer: HttpServer): void {
           const room = rooms.get(roomId);
           if (room && room.peers.has(oldSocketId)) {
             room.peers.delete(oldSocketId);
-            // Use io.to() — socket itself is already gone
             io.to(roomId).emit("peer-left", { socketId: oldSocketId });
             if (room.peers.size === 0) rooms.delete(roomId);
             logger.info({ socketId: oldSocketId, roomId }, "Grace timer expired — peer-left emitted");
