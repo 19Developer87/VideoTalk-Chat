@@ -592,6 +592,7 @@ export function CallRoom() {
 
   const showFullOverlay = status !== "connected" && status !== "reconnecting";
   const showLocalPreview = !webrtc.videoOff && devCaps.hasCamera && status === "connected" && peerCount >= 2;
+  const showSwitchCameraButton = devCaps.hasCamera && cameraDevices.length > 1;
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
@@ -965,6 +966,16 @@ export function CallRoom() {
               ? <VideoOff className="w-5 h-5" />
               : <Video    className="w-5 h-5" />}
           </button>
+
+          {showSwitchCameraButton && (
+            <button
+              onClick={handleSwitchCamera}
+              className="w-12 h-12 rounded-xl flex items-center justify-center bg-zinc-800 text-white hover:bg-zinc-700 transition"
+              title="Switch camera"
+            >
+              <Video className="w-5 h-5 scale-x-[-1]" />
+            </button>
+          )}
 
           <button
             onClick={handleHangUp}

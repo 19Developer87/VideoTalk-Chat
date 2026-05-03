@@ -1,0 +1,68 @@
+Fix two remaining video display issues.
+
+Issue 1: Local preview still not showing video
+
+Do not change WebRTC/TURN/signaling logic.
+
+Please debug local preview specifically:
+- Confirm local media stream exists.
+- Confirm local video track exists and enabled === true.
+- Confirm localVideoRef.current exists.
+- Set localVideoRef.current.srcObject = localStream.
+- Call localVideoRef.current.play().catch(...)
+- Ensure local video element has:
+  - autoPlay
+  - playsInline
+  - muted
+- Check CSS is not hiding it when connected.
+- Check the condition for showing local preview is correct.
+
+Expected:
+- Host waiting alone: local preview hidden.
+- Once second user connects: local preview visible.
+- Local preview should show the user’s own camera.
+
+Add logs:
+- local stream exists true/false
+- local video tracks count
+- local video element exists true/false
+- local preview visible true/false
+- local preview play success/fail
+
+Issue 2: Windows PiP does not rotate when Android camera rotates
+
+Important:
+Native Windows/browser Picture-in-Picture usually follows the video element/browser behaviour and may not automatically rotate based on the sender device orientation.
+
+Add a manual remote video rotation option:
+- Add a “Rotate Remote Video” button or setting.
+- It should rotate the displayed remote video:
+  - 0 degrees
+  - 90 degrees
+  - 180 degrees
+  - 270 degrees
+- Apply this rotation to:
+  - main remote video display
+  - native PiP source video if possible
+  - in-app floating video if used
+
+Important limitation:
+- Native system PiP may not allow custom window rotation after PiP is already active.
+- If rotation is changed while PiP is active, show:
+  “Exit and re-enter PiP for rotation changes to apply.”
+- Best behaviour:
+  - user selects rotation before entering PiP
+  - then PiP uses the rotated video element if supported
+
+Implementation:
+- Store selected remote video rotation in state/localStorage.
+- Apply CSS transform to remote video:
+  transform: rotate(90deg);
+- When rotated 90/270 degrees, adjust object-fit/container sizing so the video does not get cropped badly.
+- Do not rotate local camera stream itself.
+- Do not affect WebRTC tracks.
+- This is display-only.
+
+Expected:
+- Local preview works when peer connected.
+- If Android camera orientation appears wrong on Windows/PiP, user can manually rotate remote video display.
