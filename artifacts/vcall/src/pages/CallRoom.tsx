@@ -34,6 +34,11 @@ export function CallRoom() {
   const [peerCount,     setPeerCount    ] = useState(0);
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
   const [cameraIndex,   setCameraIndex  ] = useState(0);
+  const [remoteRotation, setRemoteRotation] = useState<0 | 90 | 180 | 270>(() => {
+    const raw = Number(localStorage.getItem("remoteVideoRotation") ?? "0");
+    return (raw === 90 || raw === 180 || raw === 270) ? raw : 0;
+  });
+  const [rotationNotice, setRotationNotice] = useState("");
 
   // ─── Device capabilities ─────────────────────────────────────────────────────
   const [devCaps, setDevCaps] = useState({
@@ -351,7 +356,10 @@ export function CallRoom() {
   }, [cameraDevices, webrtc.localStreamRef.current]);
 
   const handleSwitchCamera = useCallback(async () => {
+    addLog("info", "Switch Camera clicked");
     if (cameraDevices.length <= 1) return;
+    addLog("info", `Current camera index: ${cameraIndex}`);
+    addLog("info", `Available cameras: ${cameraDevices.length}`);
     const nextIndex = (cameraIndex + 1) % cameraDevices.length;
     const nextDeviceId = cameraDevices[nextIndex]?.deviceId;
     if (!nextDeviceId) return;
@@ -360,7 +368,18 @@ export function CallRoom() {
       setCameraIndex(nextIndex);
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
     }
-  }, [cameraDevices, cameraIndex, webrtc]);
+  }, [addLog, cameraDevices, cameraIndex, webrtc]);
+
+  const handleRemoteRotation = useCallback((next: 0 | 90 | 180 | 270) => {
+    setRemoteRotation(next);
+    localStorage.setItem("remoteVideoRotation", String(next));
+    if (isPiPActive) {
+      setRotationNotice("Exit and re-enter PiP for rotation changes to apply.");
+      addLog("warn", "Exit and re-enter PiP for rotation changes to apply.");
+    } else {
+      setRotationNotice("");
+    }
+  }, [addLog, isPiPActive]);
 
   // ─── Call quality polling ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -593,18 +612,25 @@ export function CallRoom() {
   const showFullOverlay = status !== "connected" && status !== "reconnecting";
   const showLocalPreview = !webrtc.videoOff && devCaps.hasCamera && status === "connected" && peerCount >= 2;
   const showSwitchCameraButton = devCaps.hasCamera && cameraDevices.length > 1;
+  const remoteVideoStyle = {
+    transform: `rotate(${remoteRotation}deg)`,
+    transformOrigin: "center center",
+  } as React.CSSProperties;
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-screen h-[100dvh] bg-zinc-950 overflow-hidden">
 
       {/* Remote video — always mounted; srcObject cleared on permanent disconnect */}
-      <video
-        ref={remoteVideoRef}
-        autoPlay
-        playsInline
-        className="absolute inset-0 w-full h-full object-cover"
-      />
+      <div className="absolute inset-0 overflow-hidden">
+        <video
+          ref={remoteVideoRef}
+          autoPlay
+          playsInline
+          className="w-full h-full object-cover"
+          style={remoteVideoStyle}
+        />
+      </div>
 
       {/* ── Full overlay (waiting / error / permanent disconnect) ───────────── */}
       {showFullOverlay && (
@@ -798,6 +824,12 @@ export function CallRoom() {
           <div className="absolute bottom-2 left-0 right-0 text-center">
             <span className="text-white text-xs font-medium bg-black/50 px-2 py-0.5 rounded-full">You</span>
           </div>
+        </div>
+      )}
+
+      {!!rotationNotice && (
+        <div className="absolute left-4 top-20 z-30 rounded-xl border border-zinc-700 bg-zinc-900/90 px-3 py-2 text-xs text-zinc-200 shadow-2xl">
+          {rotationNotice}
         </div>
       )}
 
@@ -1046,6 +1078,23 @@ export function CallRoom() {
             <Settings className="w-5 h-5" />
           </button>
 
+        </div>
+      </div>
+
+      <div className="absolute right-4 top-20 z-20 rounded-2xl border border-zinc-700 bg-zinc-900/90 p-3 shadow-2xl">
+        <div className="text-xs text-zinc-400 mb-2">Rotate Remote Video</div>
+        <div className="flex gap-2">
+          {[0, 90, 180, 270].map(v => (
+            <button
+              key={v}
+              onClick={() => handleRemoteRotation(v as 0 | 90 | 180 | 270)}
+              className={`rounded-lg px-3 py-2 text-xs transition ${
+                remoteRotation === v ? "bg-violet-600 text-white" : "bg-zinc-800 text-zinc-300 hover:bg-zinc-700"
+              }`}
+            >
+              {v}°
+            </button>
+          ))}
         </div>
       </div>
     </div>

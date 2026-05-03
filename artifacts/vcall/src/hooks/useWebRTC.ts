@@ -407,30 +407,52 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
       log("warn", "Camera switch failed: no local stream");
       return null;
     }
+    const currentIndex = current.getVideoTracks().length > 0 ? 0 : -1;
+    log("info", `Current camera index: ${currentIndex}`);
     try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const cameras = devices.filter(d => d.kind === "videoinput");
+      log("info", `Available cameras: ${cameras.length}`);
       const target = deviceId ? `deviceId:${deviceId}` : "facingMode:environment";
       log("info", `Switching camera to ${target}`);
-      const constraints: MediaStreamConstraints = {
-        video: deviceId
-          ? { deviceId: { exact: deviceId } }
-          : { facingMode: { ideal: "environment" } },
-        audio: false,
-      };
-      const stream = await navigator.mediaDevices.getUserMedia(constraints);
-      const newVideoTrack = stream.getVideoTracks()[0];
-      if (!newVideoTrack) {
-        throw new Error("No video track returned");
+      log("info", "Requesting new camera stream…");
+      const attempt = async (constraints: MediaStreamConstraints) =>
+        navigator.mediaDevices.getUserMedia({ video: constraints.video, audio: false });
+      let stream: MediaStream;
+      try {
+        stream = await attempt({
+          video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: "environment" } },
+          audio: false,
+        });
+      } catch {
+        stream = await attempt({
+          video: { facingMode: { ideal: deviceId ? "environment" : "user" } },
+          audio: false,
+        });
       }
+      const newVideoTrack = stream.getVideoTracks()[0];
+      if (!newVideoTrack) throw new Error("No video track returned");
+      log("success", "New video track acquired");
       const sender = pcRef.current?.getSenders().find(s => s.track?.kind === "video");
       if (sender) {
+        log("info", "Replacing sender track…");
         await sender.replaceTrack(newVideoTrack);
-        log("success", "Video sender track replaced");
+        log("success", "Sender track replaced");
       }
-      localStreamRef.current = current;
-      callbacksRef.current.onLocalStreamUpdated?.(current);
-      setDebugInfo(d => ({ ...d, localVideo: true }));
-      log("success", "Local preview updated after camera switch");
-      return current;
+      const oldVideoTrack = current.getVideoTracks()[0];
+      if (oldVideoTrack && oldVideoTrack !== newVideoTrack) {
+        oldVideoTrack.stop();
+        log("info", "Old video track stopped");
+      }
+      const nextStream = new MediaStream([
+        newVideoTrack,
+        ...current.getAudioTracks(),
+      ]);
+      localStreamRef.current = nextStream;
+      callbacksRef.current.onLocalStreamUpdated?.(nextStream);
+      setDebugInfo(d => ({ ...d, localVideo: true, localAudio: current.getAudioTracks().length > 0 }));
+      log("success", "Local preview updated");
+      return nextStream;
     } catch (err) {
       log("error", `Camera switch failed: ${(err as Error).message}`);
       return null;

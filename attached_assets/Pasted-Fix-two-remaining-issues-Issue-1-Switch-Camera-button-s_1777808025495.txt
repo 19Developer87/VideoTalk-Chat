@@ -1,0 +1,70 @@
+Fix two remaining issues.
+
+Issue 1: Switch Camera button shows but does nothing
+
+The button is visible, but clicking it has no effect.
+
+Please debug the button wiring and camera switching function.
+
+Check:
+- Switch Camera button has an onClick handler.
+- onClick calls the correct switchCamera function.
+- switchCamera function logs immediately when pressed.
+- The function is not blocked by PiP/debug/settings state.
+- The function is not disabled by CSS pointer-events.
+- The function is not hidden behind another overlay.
+
+Required logs:
+- “Switch Camera clicked”
+- “Current camera index: X”
+- “Available cameras: X”
+- “Requesting new camera stream…”
+- “New video track acquired”
+- “Replacing sender track…”
+- “Sender track replaced”
+- “Old video track stopped”
+- “Local preview updated”
+
+Implementation:
+- Use enumerateDevices after permission is granted.
+- Find videoinput devices.
+- Select next camera.
+- Request new video stream using deviceId if available.
+- On Android fallback to facingMode user/environment if deviceId fails.
+- Replace WebRTC video sender track with:
+  sender.replaceTrack(newVideoTrack)
+- Update local preview stream.
+- Do not recreate the peer connection.
+- Do not stop audio.
+- Do not hang up.
+
+Issue 2: Phone rotation does not update Windows remote video orientation
+
+Important:
+WebRTC does not always automatically update video orientation across devices, especially Android camera to Windows browser/PiP.
+
+Please add a proper remote video orientation control.
+
+Requirements:
+- Add a “Rotate Remote Video” control.
+- Allow rotation:
+  - 0°
+  - 90°
+  - 180°
+  - 270°
+- Apply rotation to the remote video display on Windows and Android.
+- Save selected rotation in localStorage.
+- Make it work before entering PiP.
+- If user changes rotation while PiP is already active, show:
+  “Exit and re-enter PiP for rotation changes to apply.”
+
+Important:
+- This is display-only.
+- Do not rotate the actual camera track.
+- Do not change WebRTC, TURN, ICE, or signaling.
+- Do not rely only on phone auto-rotation metadata.
+
+Expected:
+- Switch Camera actually changes camera.
+- Remote user sees the changed camera.
+- Windows user can manually rotate the remote video if Android orientation is wrong.
