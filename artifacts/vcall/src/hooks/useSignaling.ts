@@ -9,6 +9,7 @@ export interface SignalingCallbacks {
   onAnswer:            (data: { from: string; answer: RTCSessionDescriptionInit }) => void;
   onIceCandidate:      (data: { from: string; candidate: RTCIceCandidateInit }) => void;
   onRoomFull:          (data: { roomId: string }) => void;
+  onChatMessage?:      (data: { roomId: string; senderId: string; senderName: string; message: string; timestamp: number }) => void;
   onSignalingDropped?: () => void;
   onSignalingRestored?: () => void;
   onLog?:              (level: "info" | "success" | "warn" | "error", msg: string) => void;
@@ -89,6 +90,10 @@ export function useSignaling(callbacks: SignalingCallbacks) {
       callbacksRef.current.onPeerLeft(data);
     });
 
+    socket.on("chat-message", (data) => {
+      callbacksRef.current.onChatMessage?.(data);
+    });
+
     socket.on("offer", (data: { from: string; offer: RTCSessionDescriptionInit; isRestart: boolean }) => {
       log("info", `Offer received from ${data.from}${data.isRestart ? " [ICE restart]" : ""}`);
       callbacksRef.current.onOffer(data);
@@ -137,6 +142,11 @@ export function useSignaling(callbacks: SignalingCallbacks) {
     socketRef.current?.emit("ice-candidate", { to, candidate });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const sendChatMessage = useCallback((payload: { roomId: string; senderId: string; senderName: string; message: string; timestamp: number }) => {
+    log("info", `Sending chat message to room ${payload.roomId}`);
+    socketRef.current?.emit("chat-message", payload);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
   const leaveRoom = useCallback(() => {
     // Clear stored state so reconnect doesn't auto-rejoin after intentional hang-up
     roomStateRef.current  = null;
@@ -146,5 +156,5 @@ export function useSignaling(callbacks: SignalingCallbacks) {
 
   const getSocketId = useCallback(() => socketRef.current?.id, []);
 
-  return { joinRoom, sendOffer, sendAnswer, sendIceCandidate, leaveRoom, getSocketId };
+  return { joinRoom, sendOffer, sendAnswer, sendIceCandidate, sendChatMessage, leaveRoom, getSocketId };
 }

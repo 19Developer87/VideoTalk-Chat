@@ -13,10 +13,19 @@ interface Room {
 
 type ExtendedSocket = Socket & { roomId?: string; displayName?: string };
 
+type ChatMessage = {
+  roomId: string;
+  senderId: string;
+  senderName: string;
+  message: string;
+  timestamp: number;
+};
+
 // Grace period before emitting peer-left after a socket disconnect.
 // This allows brief network drops / mobile backgrounding to recover
 // without tearing down the call.
 const DISCONNECT_GRACE_MS = 12_000;
+const MAX_CHAT_MESSAGE_LENGTH = 500;
 
 const rooms = new Map<string, Room>();
 
@@ -28,6 +37,10 @@ function getOrCreateRoom(roomId: string): Room {
     rooms.set(roomId, { peers: new Map() });
   }
   return rooms.get(roomId)!;
+}
+
+function sanitizeChatMessage(message: string): string {
+  return message.trim().replace(/[<>]/g, "").slice(0, MAX_CHAT_MESSAGE_LENGTH);
 }
 
 export function setupSignaling(httpServer: HttpServer): void {
@@ -92,6 +105,26 @@ export function setupSignaling(httpServer: HttpServer): void {
       }
 
       logger.info({ socketId: socket.id, roomId, displayName, peerCount: room.peers.size }, "Peer joined room");
+    });
+
+    socket.on("chat-message", (payload: { roomId: string; senderName: string; senderId: string; message: string; timestamp: number }) => {
+      const roomId = payload.roomId;
+      const s = socket as ExtendedSocket;
+      if (!roomId || s.roomId !== roomId) return;
+
+      const message = sanitizeChatMessage(payload.message);
+      if (!message) return;
+
+      const chatMessage: ChatMessage = {
+        roomId,
+        senderId: payload.senderId || socket.id,
+        senderName: (payload.senderName || s.displayName || "Guest").trim().slice(0, 100),
+        message,
+        timestamp: Number.isFinite(payload.timestamp) ? payload.timestamp : Date.now(),
+      };
+
+      io.to(roomId).emit("chat-message", chatMessage);
+      logger.info({ roomId, senderId: chatMessage.senderId }, "Chat message relayed");
     });
 
     // Forward offer — pass through any extra flags (e.g. isRestart).
