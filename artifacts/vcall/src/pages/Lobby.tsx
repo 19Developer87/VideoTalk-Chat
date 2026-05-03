@@ -74,7 +74,7 @@ export function Lobby() {
           <div className="inline-flex items-center justify-center w-16 h-16 rounded-2xl bg-violet-600 mb-4">
             <Video className="w-8 h-8 text-white" />
           </div>
-          <h1 className="text-3xl font-bold text-white tracking-tight">NexCall</h1>
+          <h1 className="text-3xl font-bold text-white tracking-tight">Video Talk & Chat</h1>
           <p className="text-zinc-400 mt-2 text-sm">Free peer-to-peer video calls. No account needed.</p>
         </div>
 
