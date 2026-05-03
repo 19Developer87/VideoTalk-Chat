@@ -32,6 +32,8 @@ export function CallRoom() {
   const [copiedCode,    setCopiedCode   ] = useState(false);
   const [logs,          setLogs         ] = useState<LogEntry[]>([]);
   const [peerCount,     setPeerCount    ] = useState(0);
+  const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
+  const [cameraIndex,   setCameraIndex  ] = useState(0);
 
   // ─── Device capabilities ─────────────────────────────────────────────────────
   const [devCaps, setDevCaps] = useState({
@@ -80,6 +82,12 @@ export function CallRoom() {
   // ─── WebRTC hook ────────────────────────────────────────────────────────────
   const webrtc = useWebRTC({
     onLog: addLog,
+    onLocalStreamUpdated: (stream) => {
+      if (localVideoRef.current) {
+        localVideoRef.current.srcObject = stream;
+        addLog("success", "Local preview attached");
+      }
+    },
 
     onRemoteStream: (stream) => {
       addLog("success", "Remote stream received — attaching to video element");
@@ -254,6 +262,9 @@ export function CallRoom() {
       let hasMicrophone = true;
       try {
         const rawDevices = await navigator.mediaDevices.enumerateDevices();
+        const videoDevices = rawDevices.filter(d => d.kind === "videoinput");
+        setCameraDevices(videoDevices);
+        addLog("info", `Camera devices found: ${videoDevices.length}`);
         hasCamera    = rawDevices.some(d => d.kind === "videoinput");
         hasMicrophone = rawDevices.some(d => d.kind === "audioinput");
         setDevCaps({ hasCamera, hasMicrophone, probed: true });
@@ -298,7 +309,7 @@ export function CallRoom() {
         });
         if (stream && localVideoRef.current) {
           localVideoRef.current.srcObject = stream;
-          addLog("success", "Local preview attached to video element");
+          addLog("success", "Local preview attached");
         } else if (!stream) {
           addLog("info", "No local media — joining as receive-only viewer");
         }
@@ -329,6 +340,27 @@ export function CallRoom() {
       localVideoRef.current.srcObject = webrtc.localStreamRef.current;
     }
   }, [webrtc.videoOff, webrtc.localStreamRef]);
+
+  useEffect(() => {
+    if (!webrtc.localStreamRef.current) return;
+    if (!cameraDevices.length) return;
+    const currentTrack = webrtc.localStreamRef.current.getVideoTracks()[0];
+    const currentId = currentTrack?.getSettings().deviceId;
+    const idx = cameraDevices.findIndex(d => d.deviceId === currentId);
+    if (idx >= 0) setCameraIndex(idx);
+  }, [cameraDevices, webrtc.localStreamRef.current]);
+
+  const handleSwitchCamera = useCallback(async () => {
+    if (cameraDevices.length <= 1) return;
+    const nextIndex = (cameraIndex + 1) % cameraDevices.length;
+    const nextDeviceId = cameraDevices[nextIndex]?.deviceId;
+    if (!nextDeviceId) return;
+    const stream = await webrtc.switchCamera(nextDeviceId);
+    if (stream) {
+      setCameraIndex(nextIndex);
+      if (localVideoRef.current) localVideoRef.current.srcObject = stream;
+    }
+  }, [cameraDevices, cameraIndex, webrtc]);
 
   // ─── Call quality polling ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -559,7 +591,7 @@ export function CallRoom() {
   const { debugInfo } = webrtc;
 
   const showFullOverlay = status !== "connected" && status !== "reconnecting";
-  const showLocalPreview = !webrtc.videoOff && devCaps.hasCamera && (peerCount >= 2 || status === "connected");
+  const showLocalPreview = !webrtc.videoOff && devCaps.hasCamera && status === "connected" && peerCount >= 2;
 
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (

@@ -34,6 +34,7 @@ export interface WebRTCCallbacks {
   onConnectionStateChange: (state: RTCPeerConnectionState) => void;
   onIceCandidateGathered:  (candidate: RTCIceCandidateInit) => void;
   onIceNeedsRestart?:      () => void;   // fired when ICE cannot recover on its own
+  onLocalStreamUpdated?:   (stream: MediaStream) => void;
   onLog:                   LogFn;
 }
 
@@ -400,6 +401,50 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     }
   }, [getLocalStream, log]);
 
+  const switchCamera = useCallback(async (deviceId: string) => {
+    const current = localStreamRef.current;
+    if (!current) {
+      log("warn", "Camera switch failed");
+      return null;
+    }
+    const hadAudio = current.getAudioTracks().length > 0;
+    try {
+      log("info", "Switching camera");
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { deviceId: { exact: deviceId } },
+        audio: hadAudio,
+      });
+      const newVideoTrack = stream.getVideoTracks()[0];
+      if (!newVideoTrack) {
+        throw new Error("No video track returned");
+      }
+      const sender = pcRef.current?.getSenders().find(s => s.track?.kind === "video");
+      if (sender) {
+        await sender.replaceTrack(newVideoTrack);
+      }
+      const oldVideoTracks = current.getVideoTracks();
+      oldVideoTracks.forEach(t => t.stop());
+      current.removeTrack(oldVideoTracks[0] ?? null as unknown as MediaStreamTrack);
+      current.addTrack(newVideoTrack);
+      if (hadAudio) {
+        const audioTrack = current.getAudioTracks()[0];
+        if (audioTrack) {
+          stream.getAudioTracks().forEach(t => t.stop());
+        } else {
+          stream.getAudioTracks().forEach(t => current.addTrack(t));
+        }
+      }
+      localStreamRef.current = current;
+      callbacksRef.current.onLocalStreamUpdated?.(current);
+      setDebugInfo(d => ({ ...d, localVideo: true }));
+      log("success", "Camera switched successfully");
+      return current;
+    } catch (err) {
+      log("error", "Camera switch failed");
+      return null;
+    }
+  }, [log]);
+
   const hangUp = useCallback(() => {
     log("warn", "Hang up — closing PC and stopping tracks");
     clearIceGraceTimer();
@@ -494,6 +539,7 @@ export function useWebRTC(callbacks: WebRTCCallbacks) {
     toggleAudio,
     toggleVideo,
     changeQuality,
+    switchCamera,
     hangUp,
     enablePiP,
     audioMuted,
