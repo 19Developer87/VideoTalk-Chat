@@ -4,12 +4,10 @@ import { useSignaling } from "@/hooks/useSignaling";
 import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
 import { useCapacitorPiP } from "@/hooks/useCapacitorPiP";
 import { DebugLog, LogEntry } from "@/components/DebugLog";
-import { ChatPanel, ChatEntry as ChatMessage } from "@/components/ChatPanel";
 import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
   PictureInPicture2, Minimize2, X, Link,
   Wifi, WifiOff, Loader2, CheckCheck, Users,
-  MessageSquareText, Send, PanelRightClose,
 } from "lucide-react";
 
 type ConnectionStatus = "connecting" | "waiting" | "connected" | "reconnecting" | "disconnected" | "error" | "full";
@@ -32,15 +30,10 @@ export function CallRoom() {
   const [copiedCode, setCopiedCode] = useState(false);
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [peerCount, setPeerCount] = useState(0);
-  const [chatOpen, setChatOpen] = useState(false);
-  const [chatMessages, setChatMessages] = useState<ChatMessage[]>([]);
-  const [chatInput, setChatInput] = useState("");
 
   const [devCaps, setDevCaps] = useState({ hasCamera: true, hasMicrophone: true, probed: false });
   const [isPiPActive, setIsPiPActive] = useState(false);
   const controlsBarRef = useRef<HTMLDivElement>(null);
-  const chatInputRef = useRef<HTMLTextAreaElement>(null);
-  const chatListRef = useRef<HTMLDivElement>(null);
   const capacitorPiP = useCapacitorPiP();
 
   type FloatPosition =
@@ -67,10 +60,6 @@ export function CallRoom() {
   const inviteLink = `${window.location.origin}/?room=${roomId}`;
   const addLog = useCallback((level: LogEntry["level"], msg: string) => {
     setLogs(prev => [...prev, { time: ts(), level, msg }]);
-  }, []);
-
-  const appendChat = useCallback((entry: ChatMessage) => {
-    setChatMessages(prev => [...prev, entry]);
   }, []);
 
   const webrtc = useWebRTC({
@@ -212,19 +201,7 @@ export function CallRoom() {
       setStatus("full");
       setStatusMessage("Room is full (max 2 people)");
     },
-    onChatMessage: (msg) => {
-      appendChat(msg);
-    },
   });
-
-  const handleSendChat = useCallback(() => {
-    const text = chatInput.trim();
-    if (!text || text.length > 500) return;
-    const message = { senderId: signaling.getSocketId() || "", senderName: displayName, message: text, timestamp: Date.now() };
-    appendChat(message);
-    signaling.sendChatMessage({ roomId: roomId!, senderId: message.senderId, senderName: displayName, message: text, timestamp: message.timestamp });
-    setChatInput("");
-  }, [appendChat, chatInput, displayName, roomId, signaling]);
 
   const handleHangUp = useCallback(() => {
     webrtc.hangUp();
@@ -244,9 +221,6 @@ export function CallRoom() {
           <div className="flex items-center gap-2 text-xs text-zinc-300">
             <Users className="h-4 w-4" />
             <span>{peerCount} in room</span>
-            <button onClick={() => setChatOpen(v => !v)} className="rounded-lg border border-white/10 px-3 py-2 hover:bg-white/5">
-              <MessageSquareText className="h-4 w-4" />
-            </button>
             <button onClick={handleHangUp} className="rounded-lg bg-red-600 px-3 py-2 hover:bg-red-500">
               <PhoneOff className="h-4 w-4" />
             </button>
@@ -260,7 +234,6 @@ export function CallRoom() {
             <button onClick={handleHangUp} className="rounded-full bg-black/50 p-3"><PhoneOff className="h-4 w-4" /></button>
             <button onClick={() => setShowSettings(v => !v)} className="rounded-full bg-black/50 p-3"><Settings className="h-4 w-4" /></button>
           </div>
-          <ChatPanel open={chatOpen} messages={chatMessages} input={chatInput} onInputChange={setChatInput} onSend={handleSendChat} onClose={() => setChatOpen(false)} inputRef={chatInputRef} listRef={chatListRef} />
           {showDebug ? <div className="absolute bottom-0 left-0 right-0"><DebugLog entries={logs} onClose={() => setShowDebug(false)} /></div> : null}
         </div>
       </div>
