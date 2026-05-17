@@ -47,3 +47,37 @@ Thumbs.db
 # Replit
 .cache/
 .local/
+
+# Local cleanup/restructure backups
+/backups/
+
+# Temporary recovery copy kept during restructure validation
+/artifacts_ignore/
+
+# Local editor state
+/.vs/
+
+# Package manager noise
+package-lock.json
+
+# Android / Capacitor generated output
+artifacts/*/android/.gradle/
+artifacts/*/android/.idea/
+artifacts/*/android/local.properties
+artifacts/*/android/app/build/
+artifacts/*/android/build/
+artifacts/*/android/capacitor-cordova-android-plugins/
+artifacts/*/android/capacitor.settings.gradle
+artifacts/*/android/app/capacitor.build.gradle
+artifacts/*/android/app/src/main/assets/public/
+artifacts/*/android/app/src/main/assets/capacitor.config.json
+artifacts/*/android/app/src/main/assets/capacitor.plugins.json
+artifacts/*/android/app/src/main/res/xml/config.xml
+
+# Generated package output
+artifacts/*/dist/
+
+# Local runtime/test artifacts
+/.runtime-*
+/android-screen.png
+/android-window.xml

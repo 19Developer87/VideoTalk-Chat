@@ -1,6 +1,29 @@
 import { useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
 
+const LOCAL_SIGNALING_URL = "http://10.249.111.188:3000";
+const SOCKET_PATH = "/api/socket.io";
+
+function getSignalingServerUrl() {
+  const overrideUrl = (import.meta.env.VITE_SIGNALING_URL as string | undefined)?.trim();
+  if (overrideUrl) {
+    return overrideUrl.replace(/\/$/, "");
+  }
+
+  const isCapacitorLocal =
+    window.location.protocol === "capacitor:" ||
+    window.location.origin === "https://localhost";
+  const isLocalBrowser =
+    window.location.hostname === "localhost" ||
+    window.location.hostname === "127.0.0.1";
+
+  if (isCapacitorLocal || isLocalBrowser || import.meta.env.DEV) {
+    return LOCAL_SIGNALING_URL;
+  }
+
+  return window.location.origin;
+}
+
 export interface SignalingCallbacks {
   onJoinedRoom:        (data: { roomId: string; peers: Array<{ socketId: string; displayName: string }>; isInitiator: boolean }) => void;
   onPeerJoined:        (data: { socketId: string; displayName: string }) => void;
@@ -8,6 +31,7 @@ export interface SignalingCallbacks {
   onOffer:             (data: { from: string; offer: RTCSessionDescriptionInit; isRestart: boolean }) => void;
   onAnswer:            (data: { from: string; answer: RTCSessionDescriptionInit }) => void;
   onIceCandidate:      (data: { from: string; candidate: RTCIceCandidateInit }) => void;
+  onPeerOrientation?:   (data: { from: string; orientation: "portrait" | "landscape"; angle: number }) => void;
   onRoomFull:          (data: { roomId: string }) => void;
   onSignalingDropped?: () => void;
   onSignalingRestored?: () => void;
@@ -22,6 +46,8 @@ export function useSignaling(callbacks: SignalingCallbacks) {
   // Persist room state across reconnects
   const roomStateRef  = useRef<{ roomId: string; displayName: string } | null>(null);
   const hasJoinedOnce = useRef(false);
+  const iceSendCountRef = useRef(0);
+  const iceRecvCountRef = useRef(0);
 
   const log = (level: "info" | "success" | "warn" | "error", msg: string) => {
     callbacksRef.current.onLog?.(level, msg);
@@ -32,20 +58,24 @@ export function useSignaling(callbacks: SignalingCallbacks) {
     // On Capacitor/Android: window.location is "capacitor://localhost" which is
     // not the signaling server. Set VITE_SIGNALING_URL at build time to override:
     //   VITE_SIGNALING_URL=https://your-app.replit.app pnpm build:android
-    const overrideUrl = import.meta.env.VITE_SIGNALING_URL as string | undefined;
-    const serverUrl   = overrideUrl?.replace(/\/$/, "") || window.location.origin;
-    const socketPath  = "/api/socket.io";
+    const serverUrl = getSignalingServerUrl();
+    const socketPath = SOCKET_PATH;
 
     log("info", `Frontend loaded at ${window.location.href}`);
     log("info", `Connecting to signaling server → ${serverUrl}${socketPath}`);
 
     const socket = io(serverUrl, {
-      path:                  socketPath,
-      transports:            ["websocket", "polling"],
-      reconnection:          true,
-      reconnectionAttempts:  20,
-      reconnectionDelay:     1_000,
-      reconnectionDelayMax:  5_000,
+      path: socketPath,
+      transports: ["polling", "websocket"],
+
+      reconnection: true,
+      reconnectionAttempts: 20,
+      reconnectionDelay: 1000,
+      reconnectionDelayMax: 5000,
+      timeout: 20000,
+
+      forceNew: true,
+      autoConnect: true,
     });
 
     socketRef.current = socket;
@@ -70,8 +100,12 @@ export function useSignaling(callbacks: SignalingCallbacks) {
       log("info", `Socket reconnect attempt #${n}…`);
     });
 
-    socket.on("connect_error", (err) => {
+    socket.on("connect_error", (err: any) => {
       log("error", `Socket connection error: ${err.message}`);
+      log("error", `Socket error type: ${err.type || "unknown"}`);
+      log("error", `Socket error description: ${err.description || "none"}`);
+      log("error", `Socket error context status: ${err.context?.status || "none"}`);
+      log("error", `Socket error context responseText: ${err.context?.responseText?.slice?.(0, 120) || "none"}`);
     });
 
     socket.on("joined-room", (data) => {
@@ -100,8 +134,14 @@ export function useSignaling(callbacks: SignalingCallbacks) {
     });
 
     socket.on("ice-candidate", (data) => {
-      log("info", `ICE candidate received from ${data.from}`);
+      iceRecvCountRef.current += 1;
+      log("info", `[ICE-DIAG signaling] ICE candidate received #${iceRecvCountRef.current} from ${data.from}`);
       callbacksRef.current.onIceCandidate(data);
+    });
+
+    socket.on("peer-orientation", (data: { from: string; orientation: "portrait" | "landscape"; angle: number }) => {
+      log("info", `Peer orientation received from ${data.from}: ${data.orientation} (${data.angle}deg)`);
+      callbacksRef.current.onPeerOrientation?.(data);
     });
 
     socket.on("room-full", (data) => {
@@ -133,8 +173,14 @@ export function useSignaling(callbacks: SignalingCallbacks) {
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const sendIceCandidate = useCallback((to: string, candidate: RTCIceCandidateInit) => {
-    log("info", `Sending ICE candidate to ${to}`);
+    iceSendCountRef.current += 1;
+    log("info", `[ICE-DIAG signaling] Sending ICE candidate #${iceSendCountRef.current} to ${to}`);
     socketRef.current?.emit("ice-candidate", { to, candidate });
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const sendOrientation = useCallback((to: string, orientation: "portrait" | "landscape", angle: number) => {
+    log("info", `Sending orientation to ${to}: ${orientation} (${angle}deg)`);
+    socketRef.current?.emit("peer-orientation", { to, orientation, angle });
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const leaveRoom = useCallback(() => {
@@ -146,5 +192,5 @@ export function useSignaling(callbacks: SignalingCallbacks) {
 
   const getSocketId = useCallback(() => socketRef.current?.id, []);
 
-  return { joinRoom, sendOffer, sendAnswer, sendIceCandidate, leaveRoom, getSocketId };
+  return { joinRoom, sendOffer, sendAnswer, sendIceCandidate, sendOrientation, leaveRoom, getSocketId };
 }

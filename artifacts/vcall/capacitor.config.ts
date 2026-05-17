@@ -30,6 +30,8 @@ const config: CapacitorConfig = {
 
   // ── Android-specific config ──────────────────────────────────────────────
   android: {
+    allowMixedContent: true,
+
     // Allow the app to be used without building to a device first.
     buildOptions: {
       // keystorePath:    "release.keystore",

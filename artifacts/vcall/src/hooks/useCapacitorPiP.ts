@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { AndroidPip } from "@/plugins/AndroidPip";
 
@@ -48,14 +48,24 @@ export function useCapacitorPiP() {
    * Enter native Android PiP.  Rejects if unsupported.
    * On web this should never be called (isNativeAndroid is false).
    */
-  const enterNativePiP = async (): Promise<void> => {
+  const enterNativePiP = useCallback(async (): Promise<void> => {
     await AndroidPip.enter();
-  };
+  }, []);
+
+  /**
+   * Enable Android's Home-button PiP path only while a call is active.
+   * On web this is a no-op so browser PiP behavior remains unchanged.
+   */
+  const setAutoEnterEnabled = useCallback(async (enabled: boolean): Promise<void> => {
+    if (!isNativeAndroid) return;
+    await AndroidPip.setAutoEnterEnabled({ enabled });
+  }, [isNativeAndroid]);
 
   return {
     isNativeAndroid,
     isNativeSupported,
     isInPip,
     enterNativePiP,
+    setAutoEnterEnabled,
   };
 }

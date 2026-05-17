@@ -17,6 +17,12 @@ export interface AndroidPipPlugin {
   enter(): Promise<void>;
 
   /**
+   * Allow/disallow automatic PiP entry when Android sends Home/user-leave.
+   * The app enables this only for active calls.
+   */
+  setAutoEnterEnabled(options: { enabled: boolean }): Promise<void>;
+
+  /**
    * Check whether the current device supports PiP.
    * Always resolves, never rejects.
    */

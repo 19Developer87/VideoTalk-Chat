@@ -13,9 +13,29 @@ import {
 // "reconnecting" keeps the call screen open with a banner overlay.
 // "disconnected" shows the full overlay (permanent / explicit peer-left).
 type ConnectionStatus = "connecting" | "waiting" | "connected" | "reconnecting" | "disconnected" | "error" | "full";
+type VideoOrientation = "portrait" | "landscape";
+type OrientationSnapshot = { orientation: VideoOrientation; angle: number };
 
 function ts(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false });
+}
+
+function readOrientationSnapshot(fallback?: OrientationSnapshot, preserveViewportFallback = false): OrientationSnapshot {
+  const orientationApi = typeof screen !== "undefined" ? screen.orientation : undefined;
+  const type = orientationApi?.type ?? "";
+  const angle = typeof orientationApi?.angle === "number"
+    ? orientationApi.angle
+    : ((typeof window !== "undefined" ? (window as Window & { orientation?: number }).orientation : undefined) ?? fallback?.angle ?? 0);
+
+  if (type.includes("landscape")) return { orientation: "landscape", angle };
+  if (type.includes("portrait")) return { orientation: "portrait", angle };
+
+  if (preserveViewportFallback && fallback) return fallback;
+
+  const orientation = typeof window !== "undefined" && window.matchMedia("(orientation: portrait)").matches
+    ? "portrait"
+    : "landscape";
+  return { orientation, angle };
 }
 
 export function CallRoom() {
@@ -63,6 +83,11 @@ export function CallRoom() {
   type CallQuality = "excellent" | "good" | "fair" | "poor";
   const [callQuality, setCallQuality] = useState<CallQuality | null>(null);
   const [callStats,   setCallStats  ] = useState<{ rtt: number | null; packetLoss: number | null }>({ rtt: null, packetLoss: null });
+  const [localOrientation, setLocalOrientation] = useState<OrientationSnapshot>(() => readOrientationSnapshot());
+  const [remoteOrientation, setRemoteOrientation] = useState<OrientationSnapshot | null>(null);
+  const [remoteVideoShape, setRemoteVideoShape] = useState<VideoOrientation | null>(null);
+  const [browserPiPShape, setBrowserPiPShape] = useState<VideoOrientation | null>(null);
+  const [localVideoShape, setLocalVideoShape] = useState<VideoOrientation | null>(null);
 
   // ─── Call duration timer ──────────────────────────────────────────────────────
   const [callDuration, setCallDuration] = useState(0);
@@ -70,8 +95,13 @@ export function CallRoom() {
 
   const localVideoRef  = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteVideoContainerRef = useRef<HTMLDivElement>(null);
+  const browserPiPVideoRef = useRef<HTMLVideoElement>(null);
+  const remoteStreamRef = useRef<MediaStream | null>(null);
   const remotePeerRef  = useRef<string | null>(null);
   const isInitiatorRef = useRef(false);
+  const wasPiPActiveRef = useRef(false);
+  const localOrientationRef = useRef<OrientationSnapshot>(localOrientation);
 
   const inviteLink = `${window.location.origin}/?room=${roomId}`;
 
@@ -90,17 +120,33 @@ export function CallRoom() {
     },
 
     onRemoteStream: (stream) => {
-      addLog("success", "Remote stream received — attaching to video element");
+      remoteStreamRef.current = stream;
+      addLog(
+        "success",
+        `[ICE-DIAG room] Remote stream received — id:${stream.id.slice(0, 8)} tracks:${stream.getTracks().length} video:${stream.getVideoTracks().length} audio:${stream.getAudioTracks().length}`,
+      );
       const el = remoteVideoRef.current;
       if (el) {
         if (el.srcObject !== stream) {
           el.srcObject = stream;
+          addLog("success", "[ICE-DIAG room] remoteVideo.srcObject assigned");
+        } else {
+          addLog("info", "[ICE-DIAG room] remoteVideo.srcObject already had this stream");
         }
-        el.play().catch(err => {
-          if ((err as DOMException).name !== "AbortError") {
-            addLog("warn", `Remote video play() blocked: ${err.message}`);
-          }
-        });
+        el.play()
+          .then(() => addLog("success", "[ICE-DIAG room] remoteVideo.play() success"))
+          .catch(err => {
+            if ((err as DOMException).name !== "AbortError") {
+              addLog("warn", `[ICE-DIAG room] remoteVideo.play() blocked: ${err.message}`);
+            }
+          });
+      } else {
+        addLog("error", "[ICE-DIAG room] remoteVideoRef missing when remote stream arrived");
+      }
+      const pipEl = browserPiPVideoRef.current;
+      if (pipEl) {
+        pipEl.srcObject = stream;
+        addLog("info", "Browser PiP video source updated from remote stream");
       }
       setStatus("connected");
       setStatusMessage("Connected");
@@ -124,7 +170,9 @@ export function CallRoom() {
         addLog("error", `WebRTC connection ${state} — showing disconnect screen`);
         setStatus("disconnected");
         setStatusMessage("Peer disconnected");
+        remoteStreamRef.current = null;
         if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+        if (browserPiPVideoRef.current) browserPiPVideoRef.current.srcObject = null;
       }
     },
 
@@ -147,7 +195,10 @@ export function CallRoom() {
 
     onIceCandidateGathered: (candidate) => {
       if (remotePeerRef.current) {
+        addLog("info", `[ICE-DIAG room] Forwarding local ICE candidate to ${remotePeerRef.current}`);
         signaling.sendIceCandidate(remotePeerRef.current, candidate);
+      } else {
+        addLog("warn", "[ICE-DIAG room] Local ICE candidate gathered before remote peer was known — not sent");
       }
     },
   });
@@ -232,7 +283,13 @@ export function CallRoom() {
     },
 
     onIceCandidate: async ({ candidate }) => {
+      addLog("info", "[ICE-DIAG room] Remote ICE candidate arrived from signaling — handing to WebRTC");
       await webrtc.addIceCandidate(candidate);
+    },
+
+    onPeerOrientation: ({ orientation, angle }) => {
+      setRemoteOrientation({ orientation, angle });
+      addLog("info", `Remote orientation updated: ${orientation} (${angle}deg)`);
     },
 
     onPeerLeft: () => {
@@ -243,7 +300,9 @@ export function CallRoom() {
       setPeerName("");
       remotePeerRef.current = null;
       isInitiatorRef.current = false;
+      remoteStreamRef.current = null;
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
+      if (browserPiPVideoRef.current) browserPiPVideoRef.current.srcObject = null;
     },
 
     onRoomFull: () => {
@@ -302,8 +361,18 @@ export function CallRoom() {
         addLog("warn", `ICE endpoint unreachable — using built-in STUN fallback: ${(err as Error).message}`);
       }
 
+      const hasGetUserMedia = Boolean(navigator.mediaDevices?.getUserMedia);
+      addLog("info", `window.isSecureContext: ${window.isSecureContext}`);
+      addLog("info", `location.protocol: ${window.location.protocol}`);
+      addLog("info", `navigator.mediaDevices exists: ${!!navigator.mediaDevices}`);
+      addLog("info", `getUserMedia exists: ${hasGetUserMedia}`);
+      if (!hasGetUserMedia) {
+        addLog("error", "getUserMedia unavailable — insecure context or unsupported browser");
+        setStatusMessage("Camera access requires HTTPS or the installed Android app.");
+      }
+
       try {
-        const stream = await webrtc.getLocalStream("medium", {
+        const stream = await webrtc.getLocalStream(webrtc.quality, {
           wantVideo: hasCamera,
           wantAudio: hasMicrophone,
         });
@@ -318,11 +387,11 @@ export function CallRoom() {
         const isPerms = e.name === "NotAllowedError" || e.name === "PermissionDeniedError";
         addLog("error", `Media error [${e.name ?? "?"}]: ${e.message}`);
         if (isPerms) {
-          setStatus("error");
-          setStatusMessage("Camera/microphone permission denied — allow access and reload.");
-          return;
+          addLog("warn", "Camera/microphone permission denied — joining in receive-only mode");
+          setStatusMessage("Camera/microphone permission denied — joining receive-only.");
+        } else {
+          addLog("warn", "Media unavailable — joining in receive-only mode");
         }
-        addLog("warn", "Media unavailable — joining in receive-only mode");
       }
 
       signaling.joinRoom(roomId!, displayName);
@@ -349,6 +418,141 @@ export function CallRoom() {
       .then(() => addLog("success", "Local preview play success"))
       .catch(err => addLog("error", `Local preview play failed: ${(err as Error).message}`));
   }, [addLog, status, webrtc.localStreamRef, webrtc.videoOff, cameraIndex]);
+
+  const getCurrentOrientation = useCallback(() => {
+    const preserveViewportFallback = capacitorPiP.isNativeAndroid
+      && (isPiPActive || document.visibilityState !== "visible");
+    return readOrientationSnapshot(localOrientationRef.current, preserveViewportFallback);
+  }, [capacitorPiP.isNativeAndroid, isPiPActive]);
+
+  const sendCurrentOrientation = useCallback((reason = "orientation update") => {
+    const { orientation, angle } = getCurrentOrientation();
+    const previous = localOrientationRef.current;
+    if (previous.orientation !== orientation || previous.angle !== angle) {
+      addLog("info", `Local orientation changed: ${previous.orientation} (${previous.angle}deg) -> ${orientation} (${angle}deg)`);
+    }
+    localOrientationRef.current = { orientation, angle };
+    setLocalOrientation({ orientation, angle });
+
+    if (!remotePeerRef.current) {
+      addLog("info", `Orientation preserved locally (${reason}): ${orientation} (${angle}deg)`);
+      return;
+    }
+    addLog("info", `Sending orientation update (${reason}): ${orientation} (${angle}deg)`);
+    signaling.sendOrientation(remotePeerRef.current, orientation, angle);
+  }, [addLog, getCurrentOrientation, signaling.sendOrientation]);
+
+  const updateRemoteVideoShape = useCallback((video: HTMLVideoElement, source: string) => {
+    if (!video.videoWidth || !video.videoHeight) return;
+    const shape = video.videoHeight > video.videoWidth ? "portrait" : "landscape";
+    const rect = remoteVideoContainerRef.current?.getBoundingClientRect();
+    setRemoteVideoShape(shape);
+    setBrowserPiPShape(shape);
+    addLog("info", `${source}: ${video.videoWidth}x${video.videoHeight} (${shape}); container:${Math.round(rect?.width ?? 0)}x${Math.round(rect?.height ?? 0)} fit:contain orientation:${remoteOrientation?.orientation ?? "unknown"} device:${getCurrentOrientation().orientation}`);
+  }, [addLog, getCurrentOrientation, remoteOrientation?.orientation]);
+
+  const syncBrowserPiPVideo = useCallback((reason: string) => {
+    const pipEl = browserPiPVideoRef.current;
+    const remoteStream = remoteStreamRef.current;
+    if (!pipEl || !remoteStream) return;
+    if (pipEl.srcObject !== remoteStream) {
+      pipEl.srcObject = remoteStream;
+      addLog("info", `Browser PiP video source refreshed - ${reason}`);
+    }
+    const shape = pipEl.videoHeight > pipEl.videoWidth
+      ? "portrait"
+      : pipEl.videoWidth > 0 && pipEl.videoHeight > 0
+        ? "landscape"
+        : remoteVideoShape ?? remoteOrientation?.orientation ?? null;
+    if (shape) setBrowserPiPShape(shape);
+    pipEl.play().catch(err => {
+      const error = err as DOMException;
+      if (error.name !== "AbortError") {
+        addLog("warn", `Browser PiP replay failed after ${reason}: ${error.message}`);
+      }
+    });
+  }, [addLog, remoteOrientation?.orientation, remoteVideoShape]);
+
+  useEffect(() => {
+    if (status !== "connected" && status !== "reconnecting") return;
+    sendCurrentOrientation("call active");
+
+    const onOrientationChange = () => {
+      window.setTimeout(() => sendCurrentOrientation("device orientation changed"), 150);
+    };
+
+    window.addEventListener("orientationchange", onOrientationChange);
+    window.addEventListener("resize", onOrientationChange);
+    screen.orientation?.addEventListener?.("change", onOrientationChange);
+    return () => {
+      window.removeEventListener("orientationchange", onOrientationChange);
+      window.removeEventListener("resize", onOrientationChange);
+      screen.orientation?.removeEventListener?.("change", onOrientationChange);
+    };
+  }, [sendCurrentOrientation, status]);
+
+  useEffect(() => {
+    if (status !== "connected" && status !== "reconnecting") return;
+    syncBrowserPiPVideo("remote orientation or shape update");
+  }, [browserPiPShape, remoteOrientation, remoteVideoShape, status, syncBrowserPiPVideo]);
+
+  const reattachVideoElements = useCallback((reason: string) => {
+    addLog("info", reason);
+
+    const localStream = webrtc.localStreamRef.current;
+    const localEl = localVideoRef.current;
+    const localTrack = localStream?.getVideoTracks()[0] ?? null;
+    addLog("info", `Local stream exists: ${!!localStream}; local preview element exists: ${!!localEl}`);
+    addLog(
+      "info",
+      `Local video track state after PiP — exists:${!!localTrack} readyState:${localTrack?.readyState ?? "none"} enabled:${localTrack?.enabled ?? "n/a"} muted:${localTrack?.muted ?? "n/a"}`,
+    );
+
+    if (localEl && localStream && localTrack && localTrack.readyState === "live") {
+      addLog("info", "Reattaching local preview after PiP");
+      localEl.srcObject = localStream;
+      localEl.play()
+        .then(() => addLog("success", "Local preview reattached successfully"))
+        .catch(err => addLog("warn", `Local preview reattach play failed: ${(err as Error).message}`));
+    } else if (localStream && (!localTrack || localTrack.readyState === "ended")) {
+      addLog("warn", "Local video track missing or ended after PiP — reacquiring camera");
+      void webrtc.restoreVideoAfterPiP().then((stream) => {
+        if (!stream || !localVideoRef.current) return;
+        localVideoRef.current.srcObject = stream;
+        localVideoRef.current.play()
+          .then(() => addLog("success", "Local preview reattached successfully"))
+          .catch(err => addLog("warn", `Local preview reattach play failed: ${(err as Error).message}`));
+      });
+    }
+
+    const remoteStream = remoteStreamRef.current;
+    if (remoteVideoRef.current && remoteStream) {
+      if (remoteVideoRef.current.srcObject !== remoteStream) {
+        remoteVideoRef.current.srcObject = remoteStream;
+        addLog("info", "Remote video reattached after PiP");
+      }
+      remoteVideoRef.current.play()
+        .catch(err => addLog("warn", `Remote video replay after PiP failed: ${(err as Error).message}`));
+    }
+
+    if (browserPiPVideoRef.current && remoteStream) {
+      browserPiPVideoRef.current.srcObject = remoteStream;
+      syncBrowserPiPVideo("video element restore");
+    }
+  }, [addLog, syncBrowserPiPVideo, webrtc.localStreamRef, webrtc.restoreVideoAfterPiP]);
+
+  const restoreVideoElementsSoon = useCallback((reason: string) => {
+    addLog("info", reason);
+    window.requestAnimationFrame(() => {
+      reattachVideoElements(`${reason} - frame restore`);
+    });
+    window.setTimeout(() => {
+      reattachVideoElements(`${reason} - delayed restore`);
+    }, 100);
+    window.setTimeout(() => {
+      reattachVideoElements(`${reason} - final restore check`);
+    }, 500);
+  }, [addLog, reattachVideoElements]);
 
   useEffect(() => {
     if (status !== "connected") return;
@@ -380,18 +584,17 @@ export function CallRoom() {
 
   const handleSwitchCamera = useCallback(async () => {
     addLog("info", "Switch Camera clicked");
-    if (cameraDevices.length <= 1) return;
+    if (cameraDevices.length <= 1 && !capacitorPiP.isNativeAndroid) return;
     addLog("info", `Current camera index: ${cameraIndex}`);
     addLog("info", `Available cameras: ${cameraDevices.length}`);
-    const nextIndex = (cameraIndex + 1) % cameraDevices.length;
+    const nextIndex = cameraDevices.length > 0 ? (cameraIndex + 1) % cameraDevices.length : 0;
     const nextDeviceId = cameraDevices[nextIndex]?.deviceId;
-    if (!nextDeviceId) return;
-    const stream = await webrtc.switchCamera(nextDeviceId);
+    const stream = await webrtc.switchCamera(nextDeviceId ?? "");
     if (stream) {
       setCameraIndex(nextIndex);
       if (localVideoRef.current) localVideoRef.current.srcObject = stream;
     }
-  }, [addLog, cameraDevices, cameraIndex, webrtc]);
+  }, [addLog, cameraDevices, cameraIndex, capacitorPiP.isNativeAndroid, webrtc]);
 
   // ─── Call quality polling ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -440,18 +643,21 @@ export function CallRoom() {
   useEffect(() => {
     if (capacitorPiP.isNativeAndroid) return;
 
-    const video = remoteVideoRef.current;
+    const video = browserPiPVideoRef.current ?? remoteVideoRef.current;
     if (!video) return;
 
     const onEnter = () => {
+      sendCurrentOrientation("entered browser PiP");
+      const { orientation, angle } = localOrientationRef.current;
       setIsPiPActive(true);
-      addLog("info", "Entered PiP mode — controls locked");
+      addLog("info", `Entered PiP with orientation: ${orientation} (${angle}deg)`);
       (document.activeElement as HTMLElement | null)?.blur();
     };
 
     const onLeave = () => {
       setIsPiPActive(false);
-      addLog("info", "Left PiP mode — controls restored");
+      addLog("info", "Left PiP mode - controls restored");
+      restoreVideoElementsSoon("Browser PiP exited - restoring fullscreen video elements");
     };
 
     video.addEventListener("enterpictureinpicture", onEnter);
@@ -460,7 +666,7 @@ export function CallRoom() {
       video.removeEventListener("enterpictureinpicture", onEnter);
       video.removeEventListener("leavepictureinpicture", onLeave);
     };
-  }, [addLog, capacitorPiP.isNativeAndroid]);
+  }, [addLog, capacitorPiP.isNativeAndroid, restoreVideoElementsSoon, sendCurrentOrientation]);
 
   // ─── PiP enter / leave tracking — Capacitor Android ─────────────────────────
   useEffect(() => {
@@ -468,14 +674,63 @@ export function CallRoom() {
     if (capacitorPiP.isInPip === isPiPActive) return;
 
     if (capacitorPiP.isInPip) {
+      sendCurrentOrientation("entered native Android PiP");
+      const { orientation, angle } = localOrientationRef.current;
       setIsPiPActive(true);
-      addLog("info", "Entered native Android PiP — controls locked");
+      addLog("info", `Entered native Android PiP with orientation: ${orientation} (${angle}deg)`);
       (document.activeElement as HTMLElement | null)?.blur();
     } else {
       setIsPiPActive(false);
-      addLog("info", "Left native Android PiP — controls restored");
+      addLog("info", "Left native Android PiP - controls restored");
+      restoreVideoElementsSoon("Left native Android PiP - restoring fullscreen video elements");
     }
-  }, [capacitorPiP.isNativeAndroid, capacitorPiP.isInPip, isPiPActive, addLog]);
+  }, [capacitorPiP.isNativeAndroid, capacitorPiP.isInPip, isPiPActive, addLog, restoreVideoElementsSoon, sendCurrentOrientation]);
+
+  useEffect(() => {
+    const hasActiveCall = status === "connected" || status === "reconnecting";
+    const restoreIfActive = (reason: string) => {
+      if (!hasActiveCall) return;
+      restoreVideoElementsSoon(reason);
+    };
+
+    const onVisibilityChange = () => {
+      addLog("info", `visibilitychange - ${document.visibilityState}`);
+      const { orientation, angle } = getCurrentOrientation();
+      if (document.visibilityState !== "visible") {
+        addLog("info", `App backgrounded with orientation: ${orientation} (${angle}deg)`);
+        sendCurrentOrientation("app backgrounded");
+      }
+      if (document.visibilityState === "visible") {
+        sendCurrentOrientation("app visible");
+        restoreIfActive("visibilitychange visible - restoring video elements");
+      }
+    };
+    const onFocus = () => {
+      addLog("info", "App focused - checking video elements");
+      restoreIfActive("App focused - restoring video elements");
+    };
+    const onPageShow = () => {
+      addLog("info", "App resumed/pageshow - checking video elements");
+      restoreIfActive("App resumed - restoring video elements");
+    };
+    const onFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        addLog("info", "Fullscreen restored - checking video elements");
+        restoreIfActive("Fullscreen restored - restoring video elements");
+      }
+    };
+
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    document.addEventListener("fullscreenchange", onFullscreenChange);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("pageshow", onPageShow);
+    return () => {
+      document.removeEventListener("visibilitychange", onVisibilityChange);
+      document.removeEventListener("fullscreenchange", onFullscreenChange);
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("pageshow", onPageShow);
+    };
+  }, [addLog, getCurrentOrientation, sendCurrentOrientation, status, restoreVideoElementsSoon]);
 
   // ─── Keydown blocker during PiP ──────────────────────────────────────────────
   useEffect(() => {
@@ -536,12 +791,14 @@ export function CallRoom() {
   }, [webrtc, signaling, navigate]);
 
   const handleQualityChange = useCallback(async (q: VideoQuality) => {
+    addLog("info", `Quality button selected: ${q}`);
     await webrtc.changeQuality(q);
     if (localVideoRef.current && webrtc.localStreamRef.current) {
       localVideoRef.current.srcObject = webrtc.localStreamRef.current;
+      localVideoRef.current.play().catch(err => addLog("warn", `Local preview play after quality change failed: ${(err as Error).message}`));
     }
     setShowSettings(false);
-  }, [webrtc]);
+  }, [addLog, webrtc]);
 
   const handlePiPClick = useCallback(async () => {
     addLog("info", "PiP button pressed");
@@ -552,7 +809,9 @@ export function CallRoom() {
         return;
       }
       try {
-        addLog("info", "Entering native Android PiP");
+        sendCurrentOrientation("before entering native Android PiP");
+        const { orientation, angle } = localOrientationRef.current;
+        addLog("info", `Entering native Android PiP with orientation: ${orientation} (${angle}deg)`);
         await capacitorPiP.enterNativePiP();
       } catch (err) {
         addLog("error", `Native Android PiP failed: ${(err as Error).message}`);
@@ -560,9 +819,27 @@ export function CallRoom() {
       return;
     }
 
-    const video = remoteVideoRef.current;
+    const src = remoteStreamRef.current ?? remoteVideoRef.current?.srcObject;
+    const video = browserPiPVideoRef.current ?? remoteVideoRef.current;
     if (!video) {
       addLog("warn", "No remote video available for PiP yet");
+      return;
+    }
+    if (src instanceof MediaStream) {
+      video.srcObject = src;
+      const remoteTracks = src.getVideoTracks();
+      addLog(
+        "info",
+        `Browser PiP target prepared — remote video tracks:${remoteTracks.length} readyState:${remoteTracks[0]?.readyState ?? "none"} muted:${remoteTracks[0]?.muted ?? "n/a"}`,
+      );
+      try {
+        await video.play();
+        addLog("success", "Browser PiP target video is playing");
+      } catch (err) {
+        addLog("warn", `Browser PiP target play() failed: ${(err as Error).message}`);
+      }
+    } else {
+      addLog("warn", "No remote stream attached for browser PiP");
       return;
     }
     if (!("pictureInPictureEnabled" in document) || !document.pictureInPictureEnabled || !video.requestPictureInPicture) {
@@ -574,9 +851,10 @@ export function CallRoom() {
       await document.exitPictureInPicture();
       return;
     }
+    sendCurrentOrientation("before entering browser PiP");
     addLog("info", "Entering system PiP");
     await webrtc.enablePiP(video);
-  }, [addLog, webrtc, capacitorPiP]);
+  }, [addLog, webrtc, capacitorPiP, sendCurrentOrientation]);
 
   // ─── Float position → CSS style ──────────────────────────────────────────────
   const floatPositionStyle = (pos: FloatPosition): React.CSSProperties => {
@@ -621,22 +899,137 @@ export function CallRoom() {
 
   const { debugInfo } = webrtc;
 
-  const showFullOverlay = status !== "connected" && status !== "reconnecting";
-  const showLocalPreview = !webrtc.videoOff && devCaps.hasCamera && status === "connected" && peerCount >= 2;
-  const showSwitchCameraButton = devCaps.hasCamera && cameraDevices.length > 1;
+  const isNativePiPActive = capacitorPiP.isNativeAndroid && isPiPActive;
+  const showCallChrome = !isNativePiPActive;
+  const isBrowserPiPActive = isPiPActive && !capacitorPiP.isNativeAndroid;
+  const isAndroidReceiver = capacitorPiP.isNativeAndroid;
+  const showFullOverlay = showCallChrome && status !== "connected" && status !== "reconnecting";
+  const showLocalPreview = !webrtc.videoOff
+    && debugInfo.localVideo
+    && showCallChrome
+    && !isBrowserPiPActive
+    && status !== "error"
+    && status !== "full"
+    && status !== "disconnected";
+  const showSwitchCameraButton = devCaps.hasCamera && (cameraDevices.length > 1 || capacitorPiP.isNativeAndroid);
+  const remoteVideoStyle: React.CSSProperties = {};
+  const remoteVideoFitClass = isAndroidReceiver
+    ? "object-contain object-center"
+    : "object-contain object-center";
+  const remoteDisplayShape = remoteOrientation?.orientation ?? remoteVideoShape ?? "landscape";
+  const browserPiPDisplayShape = remoteOrientation?.orientation ?? browserPiPShape ?? remoteDisplayShape;
+  const browserPiPVideoStyle: React.CSSProperties = {
+    width: browserPiPDisplayShape === "portrait" ? 180 : 320,
+    height: browserPiPDisplayShape === "portrait" ? 320 : 180,
+    objectFit: "contain",
+    objectPosition: "center",
+    backgroundColor: "black",
+  };
+
+  useEffect(() => {
+    if (!capacitorPiP.isNativeAndroid) return;
+    const enabled = status === "connected" || status === "reconnecting";
+    void capacitorPiP.setAutoEnterEnabled(enabled)
+      .then(() => addLog("info", `Android auto PiP on background ${enabled ? "enabled" : "disabled"}`))
+      .catch(err => addLog("warn", `Android auto PiP setup failed: ${(err as Error).message}`));
+    return () => {
+      void capacitorPiP.setAutoEnterEnabled(false).catch(() => {});
+    };
+  }, [addLog, capacitorPiP.isNativeAndroid, capacitorPiP.setAutoEnterEnabled, status]);
+
+  useEffect(() => {
+    if (isPiPActive) {
+      wasPiPActiveRef.current = true;
+      return;
+    }
+    if (wasPiPActiveRef.current) {
+      wasPiPActiveRef.current = false;
+      restoreVideoElementsSoon("Fullscreen restored after PiP - restoring video elements");
+    }
+  }, [isPiPActive, restoreVideoElementsSoon]);
+
+  useEffect(() => {
+    if (!showLocalPreview) return;
+    if (status !== "connected" && status !== "reconnecting") return;
+    restoreVideoElementsSoon("Local preview visible - verifying attachment");
+  }, [showLocalPreview, status, restoreVideoElementsSoon]);
+
+  useEffect(() => {
+    if (status !== "connected" && status !== "reconnecting") return;
+    addLog("info", `Applied orientation to main video: ${remoteDisplayShape}`);
+    addLog("info", `Applied orientation to PiP video: ${browserPiPDisplayShape}`);
+    if (isPiPActive) {
+      addLog("info", `Orientation preserved during PiP: local ${localOrientation.orientation} (${localOrientation.angle}deg), remote ${remoteOrientation?.orientation ?? remoteDisplayShape}`);
+    }
+  }, [
+    addLog,
+    browserPiPDisplayShape,
+    isPiPActive,
+    localOrientation.angle,
+    localOrientation.orientation,
+    remoteDisplayShape,
+    remoteOrientation?.orientation,
+    status,
+  ]);
+
+  const localPreviewClass = localVideoShape === "landscape"
+    ? "w-52 h-32 sm:w-60 sm:h-36"
+    : "w-36 h-52 sm:w-44 sm:h-60";
+  const floatingVideoClass = remoteDisplayShape === "portrait"
+    ? "w-28 h-40 sm:w-32 sm:h-48 lg:w-40 lg:h-56"
+    : "w-32 h-24 sm:w-40 sm:h-28 lg:w-52 lg:h-36";
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-screen h-[100dvh] bg-zinc-950 overflow-hidden">
 
       {/* Remote video — always mounted; srcObject cleared on permanent disconnect */}
-      <div className="absolute inset-0 overflow-hidden">
+      <div ref={remoteVideoContainerRef} className="absolute inset-0 overflow-hidden bg-zinc-950">
         <video
           ref={remoteVideoRef}
           autoPlay
           playsInline
-          className="w-full h-full object-cover"
+          onLoadedMetadata={(event) => {
+            updateRemoteVideoShape(event.currentTarget, "Remote video dimensions");
+            syncBrowserPiPVideo("remote metadata loaded");
+          }}
+          onResize={(event) => {
+            updateRemoteVideoShape(event.currentTarget, "Remote video resized");
+            syncBrowserPiPVideo("remote video resized");
+          }}
+          className={`w-full h-full ${remoteVideoFitClass}`}
+          style={remoteVideoStyle}
+          data-video-shape={remoteVideoShape ?? "unknown"}
         />
       </div>
+
+      <video
+        ref={browserPiPVideoRef}
+        autoPlay
+        playsInline
+        muted
+        aria-hidden="true"
+        width={browserPiPDisplayShape === "portrait" ? 180 : 320}
+        height={browserPiPDisplayShape === "portrait" ? 320 : 180}
+        onLoadedMetadata={(event) => {
+          const video = event.currentTarget;
+          if (video.videoWidth && video.videoHeight) {
+            const shape = video.videoHeight > video.videoWidth ? "portrait" : "landscape";
+            setBrowserPiPShape(shape);
+            addLog("info", `Browser PiP video dimensions: ${video.videoWidth}x${video.videoHeight} (${shape})`);
+          }
+        }}
+        onResize={(event) => {
+          const video = event.currentTarget;
+          if (video.videoWidth && video.videoHeight) {
+            const shape = video.videoHeight > video.videoWidth ? "portrait" : "landscape";
+            setBrowserPiPShape(shape);
+            addLog("info", `Browser PiP video resized: ${video.videoWidth}x${video.videoHeight} (${shape})`);
+          }
+        }}
+        className="absolute left-0 top-0 opacity-0 pointer-events-none"
+        style={browserPiPVideoStyle}
+        data-video-shape={browserPiPDisplayShape}
+      />
 
       {/* ── Full overlay (waiting / error / permanent disconnect) ───────────── */}
       {showFullOverlay && (
@@ -738,7 +1131,7 @@ export function CallRoom() {
       )}
 
       {/* ── PiP active overlay ───────────────────────────────────────────────── */}
-      {isPiPActive && (
+      {showCallChrome && isPiPActive && !capacitorPiP.isNativeAndroid && (
         <div className="absolute inset-0 z-30 flex flex-col items-center justify-center bg-zinc-950/85 backdrop-blur-sm pointer-events-none select-none">
           <div className="text-center px-8">
             <div className="w-16 h-16 rounded-full bg-violet-500/20 flex items-center justify-center mx-auto mb-5">
@@ -753,7 +1146,7 @@ export function CallRoom() {
       )}
 
       {/* ── Reconnecting banner ────────────────────────────────────────────────── */}
-      {status === "reconnecting" && (
+      {showCallChrome && status === "reconnecting" && (
         <div className="absolute top-0 left-0 right-0 z-30 flex items-center justify-center py-2 px-4 bg-orange-500/90 backdrop-blur-sm">
           <Loader2 className="w-4 h-4 text-white animate-spin mr-2 shrink-0" />
           <span className="text-white text-sm font-medium">{statusMessage}</span>
@@ -761,7 +1154,7 @@ export function CallRoom() {
       )}
 
       {/* Debug log panel */}
-      {showDebug && (
+      {showCallChrome && showDebug && (
         <div className={`absolute left-4 z-50 w-full max-w-sm pointer-events-none ${status === "reconnecting" ? "top-12" : "top-4"}`}>
           <div className="pointer-events-auto">
             <DebugLog entries={logs} onClose={() => setShowDebug(false)} />
@@ -787,7 +1180,7 @@ export function CallRoom() {
       )}
 
       {/* Peer name badge with signal bars */}
-      {(status === "connected" || status === "reconnecting") && peerName && (
+      {showCallChrome && (status === "connected" || status === "reconnecting") && peerName && (
         <div className="absolute top-4 left-4 z-20 bg-black/40 backdrop-blur-sm rounded-xl px-3 py-1.5 flex items-center gap-2">
           <div className={`w-2 h-2 rounded-full ${status === "connected" ? "bg-emerald-400 animate-pulse" : "bg-orange-400"}`} />
           <span className="text-white text-sm font-medium">{peerName}</span>
@@ -817,14 +1210,26 @@ export function CallRoom() {
         </div>
       )}
 
-      {/* Local video preview — only rendered once the second peer is connected */}
+      {/* Local video preview — stays visible while WebRTC finalises */}
       {showLocalPreview && (
-        <div className="call-ctrl-above-28 absolute right-4 z-20 w-36 h-52 sm:w-44 sm:h-60 rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900">
+        <div className={`call-ctrl-above-28 absolute right-4 z-20 ${localPreviewClass} rounded-2xl overflow-hidden border-2 border-zinc-700 shadow-2xl bg-zinc-900 transition-[width,height] duration-200`}>
           <video
             ref={localVideoRef}
             autoPlay
             playsInline
             muted
+            onLoadedMetadata={(event) => {
+              const video = event.currentTarget;
+              const shape = video.videoHeight > video.videoWidth ? "portrait" : "landscape";
+              setLocalVideoShape(shape);
+              addLog("info", `Local preview dimensions: ${video.videoWidth}x${video.videoHeight} (${shape})`);
+            }}
+            onResize={(event) => {
+              const video = event.currentTarget;
+              const shape = video.videoHeight > video.videoWidth ? "portrait" : "landscape";
+              setLocalVideoShape(shape);
+              addLog("info", `Local preview resized: ${video.videoWidth}x${video.videoHeight} (${shape})`);
+            }}
             className="w-full h-full object-cover scale-x-[-1]"
           />
           <div className="absolute bottom-2 left-0 right-0 text-center">
@@ -834,12 +1239,12 @@ export function CallRoom() {
       )}
 
       {/* In-app floating remote video window */}
-      {isFloatActive && status === "connected" && !isPiPActive && (
+      {showCallChrome && isFloatActive && status === "connected" && !isPiPActive && (
         <div
-          className="absolute z-[25] w-32 h-24 sm:w-40 sm:h-28 lg:w-52 lg:h-36 rounded-2xl overflow-hidden border-2 border-violet-500/60 shadow-2xl bg-zinc-900"
+          className={`absolute z-[25] ${floatingVideoClass} rounded-2xl overflow-hidden border-2 border-violet-500/60 shadow-2xl bg-zinc-900 transition-[width,height] duration-200`}
           style={floatPositionStyle(floatPos)}
         >
-          <video ref={floatVideoRef} autoPlay playsInline className="w-full h-full object-cover" />
+          <video ref={floatVideoRef} autoPlay playsInline className="w-full h-full object-contain bg-black" />
           <button
             onClick={() => setIsFloatActive(false)}
             className="absolute top-1 right-1 w-6 h-6 rounded-full bg-black/60 text-white flex items-center justify-center hover:bg-black/90 transition"
@@ -856,13 +1261,15 @@ export function CallRoom() {
       )}
 
       {/* Status badge (top-right) */}
-      <div className={`absolute right-4 z-20 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]} ${status === "reconnecting" ? "top-12" : "top-4"}`}>
-        <StatusIcon />
-        <span>{statusMessage}</span>
-      </div>
+      {showCallChrome && (
+        <div className={`absolute right-4 z-20 flex items-center gap-1.5 bg-black/40 backdrop-blur-sm rounded-full px-3 py-1.5 text-xs font-medium ${statusColor[status]} ${status === "reconnecting" ? "top-12" : "top-4"}`}>
+          <StatusIcon />
+          <span>{statusMessage}</span>
+        </div>
+      )}
 
       {/* Settings panel */}
-      {showSettings && (
+      {showCallChrome && showSettings && (
         <div className="call-ctrl-above-28 absolute left-4 z-40 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52">
           <h3 className="text-white text-sm font-semibold mb-3">Settings</h3>
           {devCaps.hasCamera ? (
@@ -944,7 +1351,7 @@ export function CallRoom() {
       )}
 
       {/* Device capability badges */}
-      {devCaps.probed && (!devCaps.hasCamera || !devCaps.hasMicrophone) && (
+      {showCallChrome && devCaps.probed && (!devCaps.hasCamera || !devCaps.hasMicrophone) && (
         <div className="call-ctrl-above-24 absolute left-0 right-0 z-20 flex justify-center gap-2 px-4 pointer-events-none">
           {!devCaps.hasMicrophone && (
             <span className="flex items-center gap-1.5 text-xs bg-zinc-900/90 backdrop-blur-sm border border-zinc-700 text-zinc-400 px-3 py-1.5 rounded-full">
@@ -962,8 +1369,9 @@ export function CallRoom() {
       )}
 
       {/* Controls bar */}
-      <div ref={controlsBarRef} className="call-ctrl-bottom absolute left-0 right-0 z-20 flex items-center justify-center px-4">
-        <div className="call-controls-inner flex items-center gap-3 bg-zinc-900/90 backdrop-blur-md border border-zinc-700 rounded-2xl px-4 py-3 shadow-2xl">
+      {showCallChrome && (
+        <div ref={controlsBarRef} className="call-ctrl-bottom absolute left-0 right-0 z-20 flex items-center justify-center px-4">
+          <div className="call-controls-inner flex items-center gap-3 bg-zinc-900/90 backdrop-blur-md border border-zinc-700 rounded-2xl px-4 py-3 shadow-2xl">
 
           <button
             onClick={devCaps.hasMicrophone ? webrtc.toggleAudio : undefined}
@@ -1078,8 +1486,9 @@ export function CallRoom() {
             <Settings className="w-5 h-5" />
           </button>
 
+          </div>
         </div>
-      </div>
+      )}
 
     </div>
   );

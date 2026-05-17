@@ -112,6 +112,10 @@ export function setupSignaling(httpServer: HttpServer): void {
     });
 
     // Intentional leave (user pressed hang up) — emit peer-left immediately, no grace period
+    socket.on("peer-orientation", ({ to, orientation, angle }: { to: string; orientation: "portrait" | "landscape"; angle: number }) => {
+      io.to(to).emit("peer-orientation", { from: socket.id, orientation, angle });
+    });
+
     socket.on("leave-room", () => {
       const s = socket as ExtendedSocket;
       if (s.roomId && s.displayName) {
