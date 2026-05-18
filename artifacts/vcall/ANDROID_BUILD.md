@@ -1,115 +1,139 @@
-# NexCall — Android APK Build Guide
+# Android APK Build Guide
 
-## Prerequisites (on your local machine)
+This guide covers the current Android build for Video Talk & Chat from the canonical app folder:
 
-| Tool | Version | Download |
-|---|---|---|
-| Node.js | 18+ | https://nodejs.org |
-| pnpm | 8+ | `npm i -g pnpm` |
-| Java (JDK) | 17+ | https://adoptium.net |
-| Android Studio | Latest | https://developer.android.com/studio |
-| Android SDK | API 26+ (Android 8.0) | via Android Studio SDK Manager |
-
----
-
-## One-time setup
-
-```bash
-# 1. Clone / download the project to your machine.
-# 2. Install all workspace dependencies:
-pnpm install
-
-# 3. If the android/ folder is missing, add it (already committed in this repo):
-cd artifacts/vcall
-npx cap add android
+```text
+E:\Codex\Videotalkandchat\artifacts\vcall
 ```
 
----
+## Prerequisites
 
-## Every-time build flow
+| Tool | Purpose |
+|---|---|
+| Node.js | Runs pnpm/Vite tooling |
+| pnpm | Workspace package manager |
+| JDK 17+ | Required by Android/Gradle |
+| Android Studio / Android SDK | Android project and SDK tooling |
+| ADB-authorized Android device | Install and runtime validation |
 
-```bash
-cd artifacts/vcall
+## Local Signaling Server
 
-# Set the URL of your deployed NexCall signaling server.
-# This is the Replit "webview" or custom domain URL.
-export VITE_SIGNALING_URL=https://your-app.replit.app
+For local Wi-Fi testing, run the API/signaling server on the laptop:
 
-# Build web assets + sync to Android project:
-pnpm build:android
-# (equivalent to: pnpm build  &&  npx cap sync android)
-
-# Open in Android Studio to build the APK / AAB:
-pnpm cap:open
-# (equivalent to: npx cap open android)
+```powershell
+cd E:\Codex\Videotalkandchat\artifacts\api-server
+$env:PORT = "3000"
+pnpm run build
+pnpm run start
 ```
 
-In Android Studio:
-- **Debug APK:** Build > Build APK(s)
-- **Release AAB:** Build > Generate Signed Bundle/APK > Android App Bundle
+Health check:
 
----
+```powershell
+Invoke-WebRequest -UseBasicParsing http://127.0.0.1:3000/api/healthz
+```
 
-## Key files changed / created
+From Android, the APK needs the laptop Wi-Fi IP, not `localhost`.
 
-### Web layer
+## One-click Local Launcher
+
+From the repo root:
+
+```powershell
+.\start-local-video-chat.bat
+```
+
+The launcher opens visible terminal windows for:
+
+- API/signaling server: `artifacts/api-server`, port `3000`
+- Frontend dev server: `artifacts/vcall`, port `5173`
+
+It detects the laptop Wi-Fi IPv4 address and starts the frontend with:
+
+```text
+VITE_SIGNALING_URL=http://<wifi-ip>:3000
+```
+
+Closing the opened server windows stops the servers.
+
+## Build And Sync
+
+Run from `artifacts/vcall`:
+
+```powershell
+$env:CAPACITOR_BUILD = "true"
+$env:VITE_SIGNALING_URL = "http://<PC-WIFI-IP>:3000"
+pnpm run build
+pnpm exec cap sync android
+```
+
+`CAPACITOR_BUILD=true` makes Vite use relative asset paths for the Capacitor WebView.
+
+`VITE_SIGNALING_URL` should point at the reachable API/signaling server. For same-network testing, use the laptop Wi-Fi IPv4 address.
+
+## Build Debug APK
+
+```powershell
+cd E:\Codex\Videotalkandchat\artifacts\vcall\android
+.\gradlew.bat assembleDebug
+```
+
+Output:
+
+```text
+E:\Codex\Videotalkandchat\artifacts\vcall\android\app\build\outputs\apk\debug\app-debug.apk
+```
+
+Install:
+
+```powershell
+adb install -r E:\Codex\Videotalkandchat\artifacts\vcall\android\app\build\outputs\apk\debug\app-debug.apk
+```
+
+## Important Android Files
+
 | File | Purpose |
 |---|---|
-| `capacitor.config.ts` | Capacitor project config (appId, webDir, etc.) |
-| `src/plugins/AndroidPip.ts` | JS bridge to the native AndroidPip Capacitor plugin |
-| `src/hooks/useCapacitorPiP.ts` | React hook: detects Android, calls plugin, syncs PiP state |
-| `src/hooks/useSignaling.ts` | Added `VITE_SIGNALING_URL` env-var override for Android builds |
-| `src/pages/CallRoom.tsx` | Updated `handlePiPClick` to use native PiP on Android |
+| `capacitor.config.ts` | App-local Capacitor config, `appId: com.nexcall.app`, `webDir: dist/public` |
+| `src/plugins/AndroidPip.ts` | JS interface for the native Android PiP plugin |
+| `src/hooks/useCapacitorPiP.ts` | React hook for native PiP state, auto-enter PiP, device profile, and native orientation |
+| `src/hooks/useSignaling.ts` | Socket.IO signaling client with `VITE_SIGNALING_URL` support |
+| `src/hooks/useWebRTC.ts` | Media capture, peer connection, track replacement, receive-only fallback, PiP restore helpers |
+| `src/pages/CallRoom.tsx` | Main call UI, PiP/floating video behavior, orientation signaling/display, settings/debug panel |
+| `android/app/src/main/AndroidManifest.xml` | Permissions, optional camera/mic hardware, cleartext local HTTP, PiP support |
+| `android/app/src/main/res/xml/network_security_config.xml` | Cleartext HTTP config for local testing |
+| `android/app/src/main/java/com/nexcall/app/MainActivity.java` | Registers plugin, forwards PiP state, auto-enters PiP on Home, blocks D-pad keys in PiP |
+| `android/app/src/main/java/com/nexcall/app/AndroidPipPlugin.java` | Native PiP, auto-enter flag, device profile, native orientation snapshot |
 
-### Android layer
-| File | Purpose |
-|---|---|
-| `android/app/src/main/AndroidManifest.xml` | Permissions (CAMERA, RECORD_AUDIO, MODIFY_AUDIO_SETTINGS, INTERNET, WAKE_LOCK) + `android:supportsPictureInPicture="true"` |
-| `android/app/src/main/java/com/nexcall/app/MainActivity.java` | Registers `AndroidPipPlugin`; forwards `onPictureInPictureModeChanged` to the plugin |
-| `android/app/src/main/java/com/nexcall/app/AndroidPipPlugin.java` | Capacitor plugin: `enter()`, `isSupported()`, `pipStateChange` listener |
+## Current Android Runtime Behavior
 
----
+- Android APK can join local same-Wi-Fi calls against the laptop server.
+- Camera/microphone work when permissions are granted.
+- If camera/microphone access fails, the app can still join receive-only.
+- Camera switching replaces the active sender video track and updates local preview.
+- Android native PiP shows the remote video feed only.
+- Native PiP hides in-app controls/settings/debug UI.
+- Pressing Home/minimize during an active call auto-enters PiP.
+- Returning from PiP restores local/remote video element attachments.
+- Android PiP orientation uses native orientation snapshots and polling while in PiP so remote views do not reset just because the sender is backgrounded.
+- D-pad/OK/Enter-style input is consumed while native PiP is active.
 
-## Android PiP behaviour
+## PiP Limitations
 
-When the user taps the PiP button in the call room:
+Native Android PiP position is controlled by Android. The app can control content and aspect ratio, but should not promise exact top-left/top-right/bottom-left/bottom-right native PiP placement.
 
-1. `handlePiPClick` detects it is running on Android (`Capacitor.getPlatform() === 'android'`).
-2. Calls `AndroidPip.enter()` → native `enterPictureInPictureMode(PictureInPictureParams)`.
-3. Android shrinks the entire app to a 16:9 floating window.
-4. The WebView (and therefore the full call UI) is visible at mini size.
-5. `MainActivity.onPictureInPictureModeChanged()` fires → plugin emits `pipStateChange` → React sets `isPiPActive = true`.
-6. All in-app controls are locked (`inert` attribute + keydown blocker) so remote-control presses cannot trigger buttons.
-7. The call continues uninterrupted in the background (WebRTC runs on native threads; `onPause` is not overridden).
-8. The user re-opens the full app and presses **Hang Up** to end the call.
+The app-controlled floating overlay is separate from native PiP and can persist size/position while the full app is open.
 
----
+## Network Notes
 
-## Permissions explained
+- Android WebView cannot use the laptop's `localhost`.
+- Use the laptop Wi-Fi IPv4 address for `VITE_SIGNALING_URL`.
+- USB/RNDIS IPs may be reachable from `adb shell` but still not reachable from the APK WebView path.
+- Android browser camera/microphone access over local HTTP can be restricted by secure-context rules; APK or HTTPS is preferred for Android media testing.
 
-| Permission | Reason |
-|---|---|
-| `INTERNET` | Socket.IO signaling + TURN relay |
-| `ACCESS_NETWORK_STATE` | Socket.IO reconnect logic |
-| `CAMERA` | WebRTC local video capture |
-| `RECORD_AUDIO` | WebRTC local audio capture |
-| `MODIFY_AUDIO_SETTINGS` | Speakerphone / earpiece routing |
-| `WAKE_LOCK` | Keeps CPU awake during call when screen dims |
+## Future Work
 
-Camera and microphone are marked `required="false"` in `<uses-feature>` so the APK installs on devices without them (receive-only mode still works).
-
----
-
-## Minimum Android version
-
-**Android 8.0 (API 26)** — required for `enterPictureInPictureMode()`.
-`minSdkVersion = 22` in `android/variables.gradle` — the app installs on Android 5.1+, but PiP is disabled on older devices with a log warning instead of a crash.
-
----
-
-## Browser version (Replit / web)
-
-The web version is completely unchanged:
-- `Capacitor.getPlatform()` returns `'web'` → all Android code paths are skipped.
-- Browser PiP (`document.pictureInPictureEnabled`) continues to work as before.
-- `VITE_SIGNALING_URL` is not set, so `window.location.origin` is used as before.
+- Runtime server URL configuration, likely stored in `localStorage`.
+- Hosted signaling/TURN for 4G/external calls.
+- Multi-user call architecture.
+- More Android TV/projector real-device validation.

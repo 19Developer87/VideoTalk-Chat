@@ -1,60 +1,93 @@
-# Workspace
+# Workspace Notes
 
-## Overview
+## Current Status
 
-pnpm workspace monorepo using TypeScript. Each package manages its own dependencies.
+This project started in Replit, but the active development flow is now local VS Code/Codex plus Android Studio/Gradle.
+
+Canonical active packages:
+
+- `artifacts/vcall` - React/Vite/Capacitor Video Talk & Chat app.
+- `artifacts/api-server` - Express/Socket.IO API and signaling server.
+
+The pnpm workspace uses `artifacts/*`. Replit files may remain for history or future hosted testing, but the local validated workflow should not depend on Replit.
 
 ## Stack
 
-- **Monorepo tool**: pnpm workspaces
-- **Node.js version**: 24
-- **Package manager**: pnpm
-- **TypeScript version**: 5.9
-- **API framework**: Express 5
-- **Database**: PostgreSQL + Drizzle ORM
-- **Validation**: Zod (`zod/v4`), `drizzle-zod`
-- **API codegen**: Orval (from OpenAPI spec)
-- **Build**: esbuild (CJS bundle)
-
-## Applications
-
-### NexCall — Video Call App (`artifacts/vcall`)
-- **Preview path**: `/` (root)
-- **Stack**: React + Vite + Tailwind CSS + WebRTC + Socket.IO client
-- **Description**: Cross-platform peer-to-peer video/voice call app. Users create or join rooms via a room ID or invite link. WebRTC handles peer-to-peer media, Socket.IO handles signaling.
-
-### API Server (`artifacts/api-server`)
-- **Preview path**: `/api`
-- **Stack**: Express 5 + Socket.IO (signaling server)
-- **Socket.IO path**: `/api/socket.io`
-- **Rooms**: In-memory (max 2 peers per room)
+- Monorepo: pnpm workspaces
+- Frontend: React, Vite, Tailwind CSS, Socket.IO client, WebRTC
+- Android: Capacitor, native Android PiP plugin
+- API/signaling: Express 5, Socket.IO
+- ICE endpoint: Google STUN by default, optional Metered TURN through environment variables
 
 ## Key Commands
 
-- `pnpm run typecheck` — full typecheck across all packages
-- `pnpm run build` — typecheck + build all packages
-- `pnpm --filter @workspace/api-spec run codegen` — regenerate API hooks and Zod schemas from OpenAPI spec
-- `pnpm --filter @workspace/db run push` — push DB schema changes (dev only)
-- `pnpm --filter @workspace/api-server run dev` — run API server locally
+Root:
 
-## NexCall Features
+```powershell
+pnpm install
+pnpm run typecheck
+pnpm run build
+```
 
-- Create or join a room by entering a display name and room ID
-- Auto-join via invite link (`/?room=ROOM_ID`)
-- Full-screen remote video with local preview in corner
-- Controls: mute/unmute, camera on/off, hang up, copy invite link, settings, Picture-in-Picture
-- Video quality selector: Low (480p), Medium (720p), High (1080p)
-- Connection status messages
-- Permission error handling
-- Reconnection support via WebRTC ICE with Google STUN servers
+One-click local run:
 
-## WebRTC Architecture
+```powershell
+.\start-local-video-chat.bat
+```
 
-- **Signaling**: Socket.IO over `/api/socket.io`
-- **ICE Servers**: Google STUN (stun.l.google.com:19302, stun1, stun2)
-- **Max peers per room**: 2
-- **Peer connection**: Created fresh on each call
-- **Offer/Answer**: Standard WebRTC negotiation
-- **Cross-platform**: Works on Android (Chrome), Windows (Chrome/Edge/Firefox)
+API server:
 
-See the `pnpm-workspace` skill for workspace structure, TypeScript setup, and package details.
+```powershell
+cd artifacts/api-server
+$env:PORT = "3000"
+pnpm run build
+pnpm run start
+```
+
+Frontend:
+
+```powershell
+cd artifacts/vcall
+$env:PORT = "5173"
+$env:BASE_PATH = "/"
+$env:VITE_SIGNALING_URL = "http://<PC-WIFI-IP>:3000"
+pnpm run dev
+```
+
+Android debug APK:
+
+```powershell
+cd artifacts/vcall
+$env:CAPACITOR_BUILD = "true"
+$env:VITE_SIGNALING_URL = "http://<PC-WIFI-IP>:3000"
+pnpm run build
+pnpm exec cap sync android
+cd android
+.\gradlew.bat assembleDebug
+```
+
+## Current App Features
+
+- 4-digit room join.
+- Two-user video/audio calls.
+- Windows browser and Android APK local Wi-Fi flow.
+- Receive-only fallback.
+- Microphone/camera toggles.
+- Android camera switching.
+- Copy room code and invite link.
+- Debug log panel inside settings.
+- Browser PiP and Android native PiP.
+- Remote-video-only Android PiP.
+- PiP/fullscreen local preview restoration.
+- Orientation signaling for main remote video and PiP video.
+
+## Architecture Notes
+
+- Socket.IO path: `/api/socket.io`
+- Health endpoint: `/api/healthz`
+- ICE endpoint: `/api/ice-servers`
+- Current room capacity: 2 peers
+- Server room state: in-memory
+- Current frontend peer model: one remote peer/one remote stream
+
+Multi-user work requires a planned WebRTC architecture change, not a small UI tweak.
