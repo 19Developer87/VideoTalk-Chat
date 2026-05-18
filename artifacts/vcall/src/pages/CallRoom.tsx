@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useMemo, useRef, useState, useCallback } from "react";
 import { useParams, useLocation } from "wouter";
 import { useSignaling } from "@/hooks/useSignaling";
 import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
@@ -15,6 +15,7 @@ import {
 type ConnectionStatus = "connecting" | "waiting" | "connected" | "reconnecting" | "disconnected" | "error" | "full";
 type VideoOrientation = "portrait" | "landscape";
 type OrientationSnapshot = { orientation: VideoOrientation; angle: number };
+type FloatingVideoSize = { width: number; height: number };
 
 function ts(): string {
   return new Date().toLocaleTimeString("en-GB", { hour12: false });
@@ -36,6 +37,22 @@ function readOrientationSnapshot(fallback?: OrientationSnapshot, preserveViewpor
     ? "portrait"
     : "landscape";
   return { orientation, angle };
+}
+
+function readSavedFloatingVideoSize(): FloatingVideoSize | null {
+  try {
+    const raw = localStorage.getItem("floatVideoSize");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<FloatingVideoSize>;
+    if (typeof parsed.width !== "number" || typeof parsed.height !== "number") return null;
+    if (parsed.width < 96 || parsed.height < 72) return null;
+    return {
+      width: Math.min(640, Math.round(parsed.width)),
+      height: Math.min(480, Math.round(parsed.height)),
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function CallRoom() {
@@ -77,6 +94,8 @@ export function CallRoom() {
   const [floatPos, setFloatPos] = useState<FloatPosition>(() =>
     (localStorage.getItem("floatVideoPos") as FloatPosition | null) ?? "bottom-left"
   );
+  const [floatSize, setFloatSize] = useState<FloatingVideoSize | null>(() => readSavedFloatingVideoSize());
+  const floatContainerRef = useRef<HTMLDivElement>(null);
   const floatVideoRef = useRef<HTMLVideoElement>(null);
 
   // ─── Call quality indicator ──────────────────────────────────────────────────
@@ -425,8 +444,20 @@ export function CallRoom() {
     return readOrientationSnapshot(localOrientationRef.current, preserveViewportFallback);
   }, [capacitorPiP.isNativeAndroid, isPiPActive]);
 
-  const sendCurrentOrientation = useCallback((reason = "orientation update") => {
-    const { orientation, angle } = getCurrentOrientation();
+  const sendCurrentOrientation = useCallback(async (reason = "orientation update") => {
+    let { orientation, angle } = getCurrentOrientation();
+    if (capacitorPiP.isNativeAndroid) {
+      try {
+        const native = await capacitorPiP.getNativeOrientation();
+        if (native) {
+          orientation = native.orientation;
+          angle = native.angle;
+          addLog("info", `Native Android orientation read (${reason}): ${orientation} (${angle}deg)`);
+        }
+      } catch (err) {
+        addLog("warn", `Native Android orientation read failed (${reason}): ${(err as Error).message}`);
+      }
+    }
     const previous = localOrientationRef.current;
     if (previous.orientation !== orientation || previous.angle !== angle) {
       addLog("info", `Local orientation changed: ${previous.orientation} (${previous.angle}deg) -> ${orientation} (${angle}deg)`);
@@ -440,7 +471,7 @@ export function CallRoom() {
     }
     addLog("info", `Sending orientation update (${reason}): ${orientation} (${angle}deg)`);
     signaling.sendOrientation(remotePeerRef.current, orientation, angle);
-  }, [addLog, getCurrentOrientation, signaling.sendOrientation]);
+  }, [addLog, capacitorPiP, getCurrentOrientation, signaling.sendOrientation]);
 
   const updateRemoteVideoShape = useCallback((video: HTMLVideoElement, source: string) => {
     if (!video.videoWidth || !video.videoHeight) return;
@@ -475,10 +506,11 @@ export function CallRoom() {
 
   useEffect(() => {
     if (status !== "connected" && status !== "reconnecting") return;
-    sendCurrentOrientation("call active");
+    void sendCurrentOrientation("call active");
 
     const onOrientationChange = () => {
-      window.setTimeout(() => sendCurrentOrientation("device orientation changed"), 150);
+      addLog("info", `Orientation event received while PiP active: ${isPiPActive}`);
+      window.setTimeout(() => void sendCurrentOrientation("device orientation changed"), 150);
     };
 
     window.addEventListener("orientationchange", onOrientationChange);
@@ -489,12 +521,26 @@ export function CallRoom() {
       window.removeEventListener("resize", onOrientationChange);
       screen.orientation?.removeEventListener?.("change", onOrientationChange);
     };
-  }, [sendCurrentOrientation, status]);
+  }, [addLog, isPiPActive, sendCurrentOrientation, status]);
 
   useEffect(() => {
     if (status !== "connected" && status !== "reconnecting") return;
     syncBrowserPiPVideo("remote orientation or shape update");
   }, [browserPiPShape, remoteOrientation, remoteVideoShape, status, syncBrowserPiPVideo]);
+
+  useEffect(() => {
+    if (!capacitorPiP.isNativeAndroid || !isPiPActive) return;
+    if (status !== "connected" && status !== "reconnecting") return;
+
+    addLog("info", "Native Android PiP orientation polling started");
+    const interval = window.setInterval(() => {
+      void sendCurrentOrientation("native PiP orientation poll");
+    }, 1_000);
+    return () => {
+      window.clearInterval(interval);
+      addLog("info", "Native Android PiP orientation polling stopped");
+    };
+  }, [addLog, capacitorPiP.isNativeAndroid, isPiPActive, sendCurrentOrientation, status]);
 
   const reattachVideoElements = useCallback((reason: string) => {
     addLog("info", reason);
@@ -647,7 +693,7 @@ export function CallRoom() {
     if (!video) return;
 
     const onEnter = () => {
-      sendCurrentOrientation("entered browser PiP");
+      void sendCurrentOrientation("entered browser PiP");
       const { orientation, angle } = localOrientationRef.current;
       setIsPiPActive(true);
       addLog("info", `Entered PiP with orientation: ${orientation} (${angle}deg)`);
@@ -674,7 +720,7 @@ export function CallRoom() {
     if (capacitorPiP.isInPip === isPiPActive) return;
 
     if (capacitorPiP.isInPip) {
-      sendCurrentOrientation("entered native Android PiP");
+      void sendCurrentOrientation("entered native Android PiP");
       const { orientation, angle } = localOrientationRef.current;
       setIsPiPActive(true);
       addLog("info", `Entered native Android PiP with orientation: ${orientation} (${angle}deg)`);
@@ -698,10 +744,10 @@ export function CallRoom() {
       const { orientation, angle } = getCurrentOrientation();
       if (document.visibilityState !== "visible") {
         addLog("info", `App backgrounded with orientation: ${orientation} (${angle}deg)`);
-        sendCurrentOrientation("app backgrounded");
+        void sendCurrentOrientation("app backgrounded");
       }
       if (document.visibilityState === "visible") {
-        sendCurrentOrientation("app visible");
+        void sendCurrentOrientation("app visible");
         restoreIfActive("visibilitychange visible - restoring video elements");
       }
     };
@@ -771,6 +817,27 @@ export function CallRoom() {
     }
   }, [isFloatActive, status]);
 
+  useEffect(() => {
+    const el = floatContainerRef.current;
+    if (!isFloatActive || !el || typeof ResizeObserver === "undefined") return;
+
+    const observer = new ResizeObserver(([entry]) => {
+      const width = Math.round(entry.contentRect.width);
+      const height = Math.round(entry.contentRect.height);
+      if (width < 96 || height < 72) return;
+      setFloatSize(prev => {
+        if (prev?.width === width && prev.height === height) return prev;
+        const next = { width, height };
+        localStorage.setItem("floatVideoSize", JSON.stringify(next));
+        addLog("info", `Floating video size saved: ${width}x${height}`);
+        return next;
+      });
+    });
+
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, [addLog, isFloatActive]);
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
   const copyInvite = useCallback(async () => {
     await navigator.clipboard.writeText(inviteLink);
@@ -809,7 +876,7 @@ export function CallRoom() {
         return;
       }
       try {
-        sendCurrentOrientation("before entering native Android PiP");
+        await sendCurrentOrientation("before entering native Android PiP");
         const { orientation, angle } = localOrientationRef.current;
         addLog("info", `Entering native Android PiP with orientation: ${orientation} (${angle}deg)`);
         await capacitorPiP.enterNativePiP();
@@ -851,7 +918,7 @@ export function CallRoom() {
       await document.exitPictureInPicture();
       return;
     }
-    sendCurrentOrientation("before entering browser PiP");
+    await sendCurrentOrientation("before entering browser PiP");
     addLog("info", "Entering system PiP");
     await webrtc.enablePiP(video);
   }, [addLog, webrtc, capacitorPiP, sendCurrentOrientation]);
@@ -912,6 +979,7 @@ export function CallRoom() {
     && status !== "full"
     && status !== "disconnected";
   const showSwitchCameraButton = devCaps.hasCamera && (cameraDevices.length > 1 || capacitorPiP.isNativeAndroid);
+  const showDpadFloatingControls = capacitorPiP.deviceProfile.isRemoteControlDevice;
   const remoteVideoStyle: React.CSSProperties = {};
   const remoteVideoFitClass = isAndroidReceiver
     ? "object-contain object-center"
@@ -975,9 +1043,20 @@ export function CallRoom() {
   const localPreviewClass = localVideoShape === "landscape"
     ? "w-52 h-32 sm:w-60 sm:h-36"
     : "w-36 h-52 sm:w-44 sm:h-60";
-  const floatingVideoClass = remoteDisplayShape === "portrait"
-    ? "w-28 h-40 sm:w-32 sm:h-48 lg:w-40 lg:h-56"
-    : "w-32 h-24 sm:w-40 sm:h-28 lg:w-52 lg:h-36";
+  const defaultFloatingVideoSize: FloatingVideoSize = remoteDisplayShape === "portrait"
+    ? { width: 160, height: 224 }
+    : { width: 208, height: 144 };
+  const activeFloatingVideoSize = floatSize ?? defaultFloatingVideoSize;
+  const floatingVideoStyle = useMemo<React.CSSProperties>(() => ({
+    ...floatPositionStyle(floatPos),
+    width: activeFloatingVideoSize.width,
+    height: activeFloatingVideoSize.height,
+    minWidth: 112,
+    minHeight: 84,
+    maxWidth: "min(70vw, 640px)",
+    maxHeight: "min(70vh, 480px)",
+    resize: "both",
+  }), [activeFloatingVideoSize.height, activeFloatingVideoSize.width, floatPos]);
   // ─── Render ──────────────────────────────────────────────────────────────────
   return (
     <div className="relative w-screen h-[100dvh] bg-zinc-950 overflow-hidden">
@@ -1241,8 +1320,9 @@ export function CallRoom() {
       {/* In-app floating remote video window */}
       {showCallChrome && isFloatActive && status === "connected" && !isPiPActive && (
         <div
-          className={`absolute z-[25] ${floatingVideoClass} rounded-2xl overflow-hidden border-2 border-violet-500/60 shadow-2xl bg-zinc-900 transition-[width,height] duration-200`}
-          style={floatPositionStyle(floatPos)}
+          ref={floatContainerRef}
+          className="absolute z-[25] rounded-2xl overflow-hidden border-2 border-violet-500/60 shadow-2xl bg-zinc-900 transition-[width,height] duration-200"
+          style={floatingVideoStyle}
         >
           <video ref={floatVideoRef} autoPlay playsInline className="w-full h-full object-contain bg-black" />
           <button
@@ -1293,39 +1373,40 @@ export function CallRoom() {
             <p className="text-zinc-500 text-sm">No camera available — video quality settings are disabled.</p>
           )}
 
-          {/* Floating video position */}
-          <div className="mt-4 pt-4 border-t border-zinc-800">
-            <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Floating Video Position</p>
-            <p className="text-zinc-600 text-xs mb-3 leading-relaxed">
-              System PiP position is controlled by your device.
-              In-app floating video position can be customised here.
-            </p>
-            <div className="grid grid-cols-3 gap-1">
-              {FLOAT_GRID.map((row, ri) =>
-                row.map(({ pos, label }, ci) =>
-                  pos ? (
-                    <button
-                      key={`${ri}-${ci}`}
-                      onClick={() => {
-                        setFloatPos(pos);
-                        localStorage.setItem("floatVideoPos", pos);
-                      }}
-                      className={`py-2 rounded-lg text-sm font-medium transition ${
-                        floatPos === pos
-                          ? "bg-violet-600 text-white"
-                          : "text-zinc-400 hover:bg-zinc-800"
-                      }`}
-                      title={pos.replace(/-/g, " ")}
-                    >
-                      {label}
-                    </button>
-                  ) : (
-                    <div key={`${ri}-${ci}`} className="py-2 text-center text-zinc-700 text-sm select-none">·</div>
+          {showDpadFloatingControls && (
+            <div className="mt-4 pt-4 border-t border-zinc-800">
+              <p className="text-zinc-400 text-xs uppercase tracking-wider mb-1">Floating Video Position</p>
+              <p className="text-zinc-600 text-xs mb-3 leading-relaxed">
+                System PiP position is controlled by your device.
+                In-app floating video position can be customised here.
+              </p>
+              <div className="grid grid-cols-3 gap-1">
+                {FLOAT_GRID.map((row, ri) =>
+                  row.map(({ pos, label }, ci) =>
+                    pos ? (
+                      <button
+                        key={`${ri}-${ci}`}
+                        onClick={() => {
+                          setFloatPos(pos);
+                          localStorage.setItem("floatVideoPos", pos);
+                        }}
+                        className={`py-2 rounded-lg text-sm font-medium transition ${
+                          floatPos === pos
+                            ? "bg-violet-600 text-white"
+                            : "text-zinc-400 hover:bg-zinc-800"
+                        }`}
+                        title={pos.replace(/-/g, " ")}
+                      >
+                        {label}
+                      </button>
+                    ) : (
+                      <div key={`${ri}-${ci}`} className="py-2 text-center text-zinc-700 text-sm select-none">·</div>
+                    )
                   )
-                )
-              )}
+                )}
+              </div>
             </div>
-          </div>
+          )}
 
           {/* Debug logs toggle */}
           <div className="mt-4 pt-4 border-t border-zinc-800">

@@ -29,6 +29,25 @@ export interface AndroidPipPlugin {
   isSupported(): Promise<{ supported: boolean }>;
 
   /**
+   * Detect TV/projector/remote-control style Android devices.
+   * Used only for custom in-app floating PiP controls.
+   */
+  getDeviceProfile(): Promise<{
+    hasLeanback: boolean;
+    isTelevision: boolean;
+    hasTouchscreen: boolean;
+    hasFakeTouch: boolean;
+    hasDpad: boolean;
+    isRemoteControlDevice: boolean;
+  }>;
+
+  /**
+   * Read Android's native orientation snapshot. This remains more reliable
+   * than WebView viewport orientation while the Activity is in PiP.
+   */
+  getOrientation(): Promise<{ orientation: "portrait" | "landscape"; angle: number }>;
+
+  /**
    * Subscribe to native PiP state transitions.
    * Fires whenever the activity enters or exits PiP mode.
    */

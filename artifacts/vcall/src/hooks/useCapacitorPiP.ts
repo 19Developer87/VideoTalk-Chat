@@ -2,6 +2,16 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { Capacitor } from "@capacitor/core";
 import { AndroidPip } from "@/plugins/AndroidPip";
 
+type AndroidDeviceProfile = {
+  hasLeanback: boolean;
+  isTelevision: boolean;
+  hasTouchscreen: boolean;
+  hasFakeTouch: boolean;
+  hasDpad: boolean;
+  isRemoteControlDevice: boolean;
+};
+type NativeOrientation = { orientation: "portrait" | "landscape"; angle: number };
+
 /**
  * useCapacitorPiP — hook that bridges native Android PiP to React.
  *
@@ -22,6 +32,14 @@ export function useCapacitorPiP() {
 
   const [isNativeSupported, setIsNativeSupported] = useState(false);
   const [isInPip,           setIsInPip           ] = useState(false);
+  const [deviceProfile,     setDeviceProfile     ] = useState<AndroidDeviceProfile>({
+    hasLeanback: false,
+    isTelevision: false,
+    hasTouchscreen: true,
+    hasFakeTouch: true,
+    hasDpad: false,
+    isRemoteControlDevice: false,
+  });
   const listenerRef = useRef<{ remove: () => void } | null>(null);
 
   useEffect(() => {
@@ -31,6 +49,19 @@ export function useCapacitorPiP() {
     AndroidPip.isSupported()
       .then(({ supported }) => setIsNativeSupported(supported))
       .catch(() => setIsNativeSupported(false));
+
+    AndroidPip.getDeviceProfile()
+      .then(setDeviceProfile)
+      .catch(() => {
+        setDeviceProfile({
+          hasLeanback: false,
+          isTelevision: false,
+          hasTouchscreen: true,
+          hasFakeTouch: true,
+          hasDpad: false,
+          isRemoteControlDevice: false,
+        });
+      });
 
     // Subscribe to native PiP state changes forwarded by MainActivity.
     AndroidPip.addListener("pipStateChange", ({ isInPip: pip }) => {
@@ -61,11 +92,18 @@ export function useCapacitorPiP() {
     await AndroidPip.setAutoEnterEnabled({ enabled });
   }, [isNativeAndroid]);
 
+  const getNativeOrientation = useCallback(async (): Promise<NativeOrientation | null> => {
+    if (!isNativeAndroid) return null;
+    return AndroidPip.getOrientation();
+  }, [isNativeAndroid]);
+
   return {
     isNativeAndroid,
     isNativeSupported,
     isInPip,
+    deviceProfile,
     enterNativePiP,
     setAutoEnterEnabled,
+    getNativeOrientation,
   };
 }
