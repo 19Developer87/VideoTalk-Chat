@@ -138,17 +138,35 @@ Validated/currently implemented features include:
 
 `useSignaling.ts` currently chooses the signaling server URL in this order:
 
-1. `VITE_SIGNALING_URL`, if supplied.
-2. A local development fallback.
-3. `window.location.origin` for non-local browser origins.
+1. Selected saved server URL from `localStorage`.
+2. Manually entered active server URL from `localStorage`.
+3. `VITE_SIGNALING_URL`, if supplied.
+4. Automatic browser dev fallback: the current `window.location` origin with port `5173` replaced by `3000`.
+5. Final local fallback: `http://10.249.111.188:3000`.
 
-The current local fallback in code is `http://10.249.111.188:3000`. For reliable local testing, prefer setting `VITE_SIGNALING_URL` explicitly, usually through `start-local-video-chat.bat` or a build command.
+The app Settings panel includes **Signaling Server URL** management. Use it to enter, save, select, rename, and remove previous signaling server URLs such as laptop Wi-Fi, PC Wi-Fi, Cloudflare Tunnel, Replit, or another public server. URLs are trimmed before saving and must start with `http://` or `https://`.
+
+For local browser testing, the automatic dev fallback usually maps `http://localhost:5173` to `http://localhost:3000`. For Android APK testing, `https://localhost` is not a valid laptop server, so the APK warns in Settings/debug logs when no saved/manual/env server URL is configured.
 
 Current Socket.IO client transports are:
 
 - `["polling", "websocket"]`
 
 The previous Android-only forced polling setup was changed during runtime validation after Capacitor WebView compatibility testing. Do not change transport settings again without testing the Android APK.
+
+### Switching local signaling servers
+
+To add a local server URL:
+
+1. Start the API/signaling server on the target machine.
+2. Open the call screen Settings panel.
+3. Enter the reachable URL, for example `http://192.168.1.204:3000`.
+4. Add a nickname such as `Laptop Home Wi-Fi` or `PC Home Wi-Fi`.
+5. Click **Save Current URL**.
+
+To switch between laptop/PC/local network servers, choose a saved entry from the dropdown. Rejoin or reload the room so the Socket.IO client reconnects using the selected URL.
+
+This same saved-server flow prepares the app for external/4G testing with public URLs such as Cloudflare Tunnel, ngrok, Replit, or hosted VPS endpoints. External/mobile-carrier calling may still require TURN in addition to public signaling.
 
 ## Local Server Start Process
 
@@ -166,6 +184,7 @@ The launcher:
 - Starts the API/signaling server from `artifacts/api-server` on port `3000`.
 - Starts the frontend from `artifacts/vcall` on port `5173`.
 - Sets `VITE_SIGNALING_URL=http://<wifi-ip>:3000` for the frontend dev server.
+- Prints the detected local network API/signaling and frontend URLs so they can be copied into the app's Signaling Server URL setting.
 - Opens visible terminal windows.
 - Opens `http://localhost:5173`.
 - Does not create background services.
@@ -298,8 +317,8 @@ Current orientation/display behavior:
 ## Known Remaining Issues And Risks
 
 - Native Android PiP exact position cannot be reliably controlled by the app; Android system controls native PiP placement.
-- The local signaling fallback URL in `useSignaling.ts` is still a hardcoded development value. Builds should set `VITE_SIGNALING_URL`.
-- Server URL configuration is build-time/dev-env oriented. A user-facing/localStorage server URL configuration screen is planned but not implemented.
+- Signaling server URL selection is available in Settings and stored in `localStorage`; builds can still set `VITE_SIGNALING_URL` as a default.
+- The final local fallback URL remains a hardcoded development value, so Android APK testing should use a saved/manual server URL or `VITE_SIGNALING_URL`.
 - 4G/external connectivity is not solved yet. Same-network Wi-Fi testing works; external connectivity still needs hosted signaling and likely TURN.
 - Multi-user calls are not implemented. Current server and client state are two-peer oriented.
 - `artifacts_ignore/` remains in the workspace as a legacy backup copy.
@@ -341,11 +360,12 @@ Required changes for mesh:
 
 ### Server URL configuration
 
-Planned improvement:
+Implemented behavior:
 
 - Keep `VITE_SIGNALING_URL` for build/dev defaults.
-- Add a clean runtime configuration option later, likely stored in `localStorage`.
-- Use the same configured server URL for Socket.IO and API calls such as `/api/ice-servers`.
+- Allow runtime saved/manual signaling server URLs in `localStorage`.
+- Use the resolved signaling server URL for Socket.IO and `/api/ice-servers`.
+- Android APK warns when no reachable saved/manual/env server URL is configured.
 
 ### Android TV/projector remote-control behavior
 
