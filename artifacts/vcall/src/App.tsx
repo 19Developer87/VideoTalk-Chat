@@ -19,9 +19,13 @@ function Router() {
 }
 
 function App() {
+  const routerBase = import.meta.env.BASE_URL === "./"
+    ? ""
+    : import.meta.env.BASE_URL.replace(/\/$/, "");
+
   return (
     <TooltipProvider>
-      <WouterRouter base={import.meta.env.BASE_URL.replace(/\/$/, "")}>
+      <WouterRouter base={routerBase}>
         <Router />
       </WouterRouter>
       <Toaster />

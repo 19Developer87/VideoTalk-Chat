@@ -8,9 +8,16 @@ for /f "usebackq delims=" %%I in (`powershell -NoProfile -Command "$wifi=$false;
 
 echo Starting local Video Talk ^& Chat servers...
 echo.
-echo API/signaling: http://localhost:3000
-echo Frontend:      http://localhost:5173
-echo LAN signaling: http://%LOCAL_IP%:3000
+echo Video Talk ^& Chat servers started
+echo.
+echo API / Signaling server:
+echo http://%LOCAL_IP%:3000
+echo.
+echo Frontend:
+echo http://%LOCAL_IP%:5173
+echo.
+echo Local browser:
+echo http://localhost:5173
 echo.
 echo Close the opened terminal windows to stop the servers.
 echo.

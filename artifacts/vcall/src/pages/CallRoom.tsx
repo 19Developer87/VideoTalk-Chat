@@ -5,6 +5,17 @@ import { useWebRTC, VideoQuality } from "@/hooks/useWebRTC";
 import { useCapacitorPiP } from "@/hooks/useCapacitorPiP";
 import { DebugLog, LogEntry } from "@/components/DebugLog";
 import {
+  getSignalingStorageSnapshot,
+  isValidSignalingUrl,
+  normalizeSignalingUrl,
+  renameSavedSignalingServer,
+  removeSavedSignalingServer,
+  SavedSignalingServer,
+  setManualSignalingServerUrl,
+  setSelectedSignalingServerId,
+  upsertSavedSignalingServer,
+} from "@/lib/signalingServers";
+import {
   Mic, MicOff, Video, VideoOff, PhoneOff, Copy, Settings,
   PictureInPicture2, Minimize2, X, Link,
   Wifi, WifiOff, Loader2, CheckCheck, Users,
@@ -71,6 +82,14 @@ export function CallRoom() {
   const [peerCount,     setPeerCount    ] = useState(0);
   const [cameraDevices, setCameraDevices] = useState<MediaDeviceInfo[]>([]);
   const [cameraIndex,   setCameraIndex  ] = useState(0);
+  const [serverSnapshot, setServerSnapshot] = useState(() => getSignalingStorageSnapshot());
+  const [serverUrlInput, setServerUrlInput] = useState(() =>
+    getSignalingStorageSnapshot().resolved.url
+  );
+  const [serverNameInput, setServerNameInput] = useState(() =>
+    getSignalingStorageSnapshot().selected?.name ?? ""
+  );
+  const [serverNotice, setServerNotice] = useState("");
 
   // ─── Device capabilities ─────────────────────────────────────────────────────
   const [devCaps, setDevCaps] = useState({
@@ -126,6 +145,15 @@ export function CallRoom() {
 
   const addLog = useCallback((level: LogEntry["level"], msg: string) => {
     setLogs(prev => [...prev, { time: ts(), level, msg }]);
+  }, []);
+
+  const refreshServerSnapshot = useCallback((selectedServer?: SavedSignalingServer | null) => {
+    const next = getSignalingStorageSnapshot();
+    const selected = selectedServer ?? next.selected;
+    setServerSnapshot(next);
+    setServerUrlInput(selected?.url ?? (next.manualUrl || next.resolved.url));
+    setServerNameInput(selected?.name ?? "");
+    return next;
   }, []);
 
   // ─── WebRTC hook ────────────────────────────────────────────────────────────
@@ -355,7 +383,8 @@ export function CallRoom() {
       }
 
       try {
-        const resp = await fetch("/api/ice-servers");
+        const iceServerBaseUrl = getSignalingStorageSnapshot().resolved.url;
+        const resp = await fetch(`${iceServerBaseUrl}/api/ice-servers`);
         if (resp.ok) {
           const { iceServers, turnEnabled } = await resp.json() as {
             iceServers: RTCIceServer[];
@@ -365,7 +394,7 @@ export function CallRoom() {
             (Array.isArray(s.urls) ? s.urls : [s.urls])
               .some(u => u.startsWith("turn:") || u.startsWith("turns:"))
           ).length;
-          addLog("info", `ICE endpoint replied — total:${iceServers.length} TURN:${turnCount} turnEnabled:${turnEnabled}`);
+          addLog("info", `ICE endpoint replied from ${iceServerBaseUrl} — total:${iceServers.length} TURN:${turnCount} turnEnabled:${turnEnabled}`);
           webrtc.updateIceServers(iceServers);
           addLog(
             turnEnabled ? "success" : "warn",
@@ -867,6 +896,70 @@ export function CallRoom() {
     setShowSettings(false);
   }, [addLog, webrtc]);
 
+  const handleSaveServerUrl = useCallback(() => {
+    const url = normalizeSignalingUrl(serverUrlInput);
+    if (!isValidSignalingUrl(url)) {
+      setServerNotice("Enter a URL starting with http:// or https://");
+      addLog("warn", "Signaling server URL was not saved: invalid format");
+      return;
+    }
+    const saved = upsertSavedSignalingServer(url, serverNameInput);
+    setManualSignalingServerUrl(url);
+    setSelectedSignalingServerId(saved.id);
+    refreshServerSnapshot(saved);
+    setServerNotice("Saved. Rejoin or reload to reconnect with this server.");
+    addLog("success", `Signaling server saved: ${saved.name} → ${saved.url}`);
+  }, [addLog, refreshServerSnapshot, serverNameInput, serverUrlInput]);
+
+  const handleSelectServer = useCallback((id: string) => {
+    if (!id) {
+      setSelectedSignalingServerId("");
+      const next = refreshServerSnapshot(null);
+      setServerNotice("Using manual/default server for the next connection.");
+      addLog("info", `Signaling server selection cleared. Active fallback: ${next.resolved.url}`);
+      return;
+    }
+    const server = serverSnapshot.servers.find((item) => item.id === id);
+    if (!server) return;
+    setSelectedSignalingServerId(server.id);
+    setManualSignalingServerUrl(server.url);
+    refreshServerSnapshot(server);
+    setServerNotice("Selected. Rejoin or reload to reconnect with this server.");
+    addLog("success", `Selected signaling server: ${server.name} → ${server.url}`);
+  }, [addLog, refreshServerSnapshot, serverSnapshot.servers]);
+
+  const handleRenameServer = useCallback(() => {
+    if (!serverSnapshot.selectedId) {
+      setServerNotice("Select a saved server before renaming.");
+      return;
+    }
+    const servers = renameSavedSignalingServer(serverSnapshot.selectedId, serverNameInput);
+    const selected = servers.find((server) => server.id === serverSnapshot.selectedId) ?? null;
+    refreshServerSnapshot(selected);
+    setServerNotice("Server name updated.");
+    if (selected) addLog("success", `Renamed signaling server: ${selected.name} → ${selected.url}`);
+  }, [addLog, refreshServerSnapshot, serverNameInput, serverSnapshot.selectedId]);
+
+  const handleRemoveServer = useCallback(() => {
+    const selected = serverSnapshot.selected;
+    if (!selected) {
+      setServerNotice("Select a saved server before removing.");
+      return;
+    }
+    const removingActive = serverSnapshot.resolved.url === selected.url;
+    removeSavedSignalingServer(selected.id);
+    if (removingActive) {
+      setManualSignalingServerUrl(selected.url);
+      setSelectedSignalingServerId("");
+      setServerNotice("Removed from saved list. Current URL remains active as a manual URL.");
+      addLog("warn", `Removed saved signaling server but kept active URL: ${selected.url}`);
+    } else {
+      setServerNotice("Saved server removed.");
+      addLog("info", `Removed saved signaling server: ${selected.name}`);
+    }
+    refreshServerSnapshot(null);
+  }, [addLog, refreshServerSnapshot, serverSnapshot.resolved.url, serverSnapshot.selected]);
+
   const handlePiPClick = useCallback(async () => {
     addLog("info", "PiP button pressed");
 
@@ -980,6 +1073,13 @@ export function CallRoom() {
     && status !== "disconnected";
   const showSwitchCameraButton = devCaps.hasCamera && (cameraDevices.length > 1 || capacitorPiP.isNativeAndroid);
   const showDpadFloatingControls = capacitorPiP.deviceProfile.isRemoteControlDevice;
+  const signalingSourceLabel: Record<typeof serverSnapshot.resolved.source, string> = {
+    "selected-saved": "saved",
+    manual: "manual",
+    env: "build env",
+    "dev-origin": "local dev",
+    "local-fallback": "fallback",
+  };
   const remoteVideoStyle: React.CSSProperties = {};
   const remoteVideoFitClass = isAndroidReceiver
     ? "object-contain object-center"
@@ -1350,8 +1450,76 @@ export function CallRoom() {
 
       {/* Settings panel */}
       {showCallChrome && showSettings && (
-        <div className="call-ctrl-above-28 absolute left-4 z-40 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl min-w-52">
+        <div className="call-ctrl-above-28 absolute left-4 z-40 bg-zinc-900 border border-zinc-700 rounded-2xl p-4 shadow-2xl w-[min(calc(100vw-2rem),28rem)] max-h-[calc(100dvh-10rem)] overflow-y-auto">
           <h3 className="text-white text-sm font-semibold mb-3">Settings</h3>
+          <div className="mb-4 pb-4 border-b border-zinc-800">
+            <p className="text-zinc-400 text-xs uppercase tracking-wider mb-2">Signaling Server URL</p>
+            <div className="rounded-lg bg-zinc-950 border border-zinc-800 px-3 py-2 mb-2">
+              <p className="text-zinc-500 text-[11px] uppercase tracking-wider mb-1">
+                Current active server ({signalingSourceLabel[serverSnapshot.resolved.source]})
+              </p>
+              <p className="text-zinc-200 text-xs font-mono break-all">{serverSnapshot.resolved.url}</p>
+            </div>
+            {serverSnapshot.resolved.apkNeedsConfiguration && (
+              <p className="text-yellow-300 text-xs mb-2 leading-relaxed">
+                Android APK needs a reachable server URL. Choose your laptop, PC, tunnel, or public server before testing calls.
+              </p>
+            )}
+            <div className="space-y-2">
+              <input
+                value={serverUrlInput}
+                onChange={(event) => setServerUrlInput(event.target.value)}
+                placeholder="http://192.168.1.204:3000"
+                className="w-full bg-zinc-800 border border-zinc-700 text-white rounded-lg px-3 py-2 text-sm font-mono placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+              <input
+                value={serverNameInput}
+                onChange={(event) => setServerNameInput(event.target.value)}
+                placeholder="Nickname, e.g. Laptop Home Wi-Fi"
+                className="w-full bg-zinc-800 border border-zinc-700 text-white rounded-lg px-3 py-2 text-sm placeholder:text-zinc-500 focus:outline-none focus:ring-2 focus:ring-violet-500"
+              />
+              <div className="flex gap-2">
+                <button
+                  onClick={handleSaveServerUrl}
+                  className="flex-1 px-3 py-2 rounded-lg bg-violet-600 hover:bg-violet-500 text-white text-sm font-medium transition"
+                >
+                  Save Current URL
+                </button>
+                <button
+                  onClick={handleRenameServer}
+                  className="px-3 py-2 rounded-lg bg-zinc-800 hover:bg-zinc-700 text-zinc-200 text-sm transition"
+                >
+                  Rename
+                </button>
+              </div>
+              <select
+                value={serverSnapshot.selectedId}
+                onChange={(event) => handleSelectServer(event.target.value)}
+                className="w-full bg-zinc-800 border border-zinc-700 text-white rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-violet-500"
+              >
+                <option value="">Manual/default server</option>
+                {serverSnapshot.servers.map((server) => (
+                  <option key={server.id} value={server.id}>
+                    {server.name} - {server.url}
+                  </option>
+                ))}
+              </select>
+              <button
+                onClick={handleRemoveServer}
+                disabled={!serverSnapshot.selected}
+                className={`w-full px-3 py-2 rounded-lg text-sm transition ${
+                  serverSnapshot.selected
+                    ? "bg-zinc-800 hover:bg-zinc-700 text-zinc-300"
+                    : "bg-zinc-800/50 text-zinc-600 cursor-not-allowed"
+                }`}
+              >
+                Remove Selected Saved Server
+              </button>
+              {serverNotice && (
+                <p className="text-zinc-500 text-xs leading-relaxed">{serverNotice}</p>
+              )}
+            </div>
+          </div>
           {devCaps.hasCamera ? (
             <>
               <p className="text-zinc-400 text-xs uppercase tracking-wider mb-2">Video Quality</p>

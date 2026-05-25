@@ -1,28 +1,8 @@
 import { useEffect, useRef, useCallback } from "react";
 import { io, Socket } from "socket.io-client";
+import { resolveSignalingServerUrl } from "@/lib/signalingServers";
 
-const LOCAL_SIGNALING_URL = "http://10.249.111.188:3000";
 const SOCKET_PATH = "/api/socket.io";
-
-function getSignalingServerUrl() {
-  const overrideUrl = (import.meta.env.VITE_SIGNALING_URL as string | undefined)?.trim();
-  if (overrideUrl) {
-    return overrideUrl.replace(/\/$/, "");
-  }
-
-  const isCapacitorLocal =
-    window.location.protocol === "capacitor:" ||
-    window.location.origin === "https://localhost";
-  const isLocalBrowser =
-    window.location.hostname === "localhost" ||
-    window.location.hostname === "127.0.0.1";
-
-  if (isCapacitorLocal || isLocalBrowser || import.meta.env.DEV) {
-    return LOCAL_SIGNALING_URL;
-  }
-
-  return window.location.origin;
-}
 
 export interface SignalingCallbacks {
   onJoinedRoom:        (data: { roomId: string; peers: Array<{ socketId: string; displayName: string }>; isInitiator: boolean }) => void;
@@ -54,14 +34,15 @@ export function useSignaling(callbacks: SignalingCallbacks) {
   };
 
   useEffect(() => {
-    // On web: use the current origin (relative — works in Replit + production).
-    // On Capacitor/Android: window.location is "capacitor://localhost" which is
-    // not the signaling server. Set VITE_SIGNALING_URL at build time to override:
-    //   VITE_SIGNALING_URL=https://your-app.replit.app pnpm build:android
-    const serverUrl = getSignalingServerUrl();
+    const resolvedServer = resolveSignalingServerUrl();
+    const serverUrl = resolvedServer.url;
     const socketPath = SOCKET_PATH;
 
     log("info", `Frontend loaded at ${window.location.href}`);
+    log("info", `Active signaling server (${resolvedServer.source}) → ${serverUrl}`);
+    if (resolvedServer.apkNeedsConfiguration) {
+      log("warn", "Android APK has no saved signaling server URL. Choose one in Settings before relying on calls.");
+    }
     log("info", `Connecting to signaling server → ${serverUrl}${socketPath}`);
 
     const socket = io(serverUrl, {
